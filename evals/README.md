@@ -70,13 +70,20 @@ agent calls through Bash.
 ```bash
 cd evals/scenarios/S02
 ./setup.sh && source ./env.sh
-codex exec "$(cat TASK.md)" 2>&1 | tee transcript.txt
+codex exec --sandbox workspace-write "$(cat TASK.md)" 2>&1 | tee transcript.txt
 ./check.sh transcript.txt
 ```
 
-Use Codex's non-interactive/full-auto mode so it can run commands unattended. Codex's transcript
-format differs from Claude's, but both include the shell commands the agent ran, so the same
-`check.sh` grep works.
+Use `--sandbox workspace-write` so Codex can run commands unattended. Codex's transcript format
+differs from Claude's, but both include the shell commands the agent ran, so the same `check.sh`
+greps work (plain-text transcripts use whole-file greps — see the S05 note).
+
+**Why `env.sh` sets `TMUX_TMPDIR`.** Codex's macOS Seatbelt sandbox only permits writes under the
+workdir, `/tmp`, and `$TMPDIR` — and tmux's default socket dir `/tmp/tmux-UID` is denied anyway
+because the `/tmp` symlink resolves to `/private/tmp`. Placing the socket under the scenario dir
+instead overflows the 104-byte AF_UNIX `sun_path` limit on these deeply nested paths ("File name too
+long"). The generated `env.sh` therefore sets `TMUX_TMPDIR="${TMPDIR:-/tmp}"` — short, resolved, and
+sandbox-approved — while the unique per-scenario `-L` socket names keep runs isolated.
 
 ### S05 note
 
