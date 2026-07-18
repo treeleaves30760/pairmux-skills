@@ -2,6 +2,7 @@
 # RESULTS.md is intentionally NOT ignored — recorded runs stay tracked.
 evals/scenarios/*/state/
 evals/scenarios/*/env.sh
+evals/scenarios/*/check.out
 
 # Generated eval materials and agent transcripts.
 evals/scenarios/*/transcript*.txt
