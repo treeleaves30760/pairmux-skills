@@ -1312,23 +1312,9 @@ class PairmuxBroker:
         return resolved
 
     def _validate_socket_override(self, argv: list[str]) -> None:
-        index = 0
-        while index < len(argv):
-            value = argv[index]
-            if value == "--json":
-                index += 1
-                continue
-            if value == "--socket":
-                if index + 1 >= len(argv) or argv[index + 1] != self.expected_socket:
-                    raise ValueError("broker request overrides the episode pairmux socket")
-                index += 2
-                continue
-            if value.startswith("--socket="):
-                if value.split("=", 1)[1] != self.expected_socket:
-                    raise ValueError("broker request overrides the episode pairmux socket")
-                index += 1
-                continue
-            break
+        _rest, socket_overrides = strip_pairmux_globals(argv)
+        if any(value != self.expected_socket for value in socket_overrides):
+            raise ValueError("broker request overrides the episode pairmux socket")
 
     @staticmethod
     def _send_result(
@@ -1647,24 +1633,52 @@ def write_broker_rejections(
             stream.write("\n")
 
 
-def effective_pairmux_command(argv: object) -> tuple[str, list[str]] | None:
-    """Return the subcommand and its argv after removing pairmux global flags."""
-    if not isinstance(argv, list) or not all(isinstance(value, str) for value in argv):
-        return None
+def strip_pairmux_globals(argv: list[str]) -> tuple[list[str], list[str]]:
+    """Mirror pairmux stripGlobals while retaining observed socket overrides."""
+    rest: list[str] = []
+    socket_overrides: list[str] = []
+    no_more_globals = False
     index = 0
     while index < len(argv):
         value = argv[index]
-        if value == "--json":
+        if no_more_globals:
+            rest.append(value)
             index += 1
             continue
-        if value == "--socket":
-            index += 2
-            continue
-        if value.startswith("--socket=") or value == "--":
+        if value == "--":
+            no_more_globals = True
+            rest.append(value)
             index += 1
             continue
-        return value, argv[index + 1 :]
-    return None
+        if len(value) > 2 and value.startswith("-"):
+            flag = value.lstrip("-")
+            name, separator, inline_value = flag.partition("=")
+            if name == "json":
+                index += 1
+                continue
+            if name == "socket":
+                if separator:
+                    socket_overrides.append(inline_value)
+                elif index + 1 < len(argv):
+                    index += 1
+                    socket_overrides.append(argv[index])
+                index += 1
+                continue
+        rest.append(value)
+        index += 1
+    return rest, socket_overrides
+
+
+def effective_pairmux_command(argv: object) -> tuple[str, list[str]] | None:
+    """Return the dispatched subcommand and argv after pairmux global parsing."""
+    if not isinstance(argv, list) or not all(isinstance(value, str) for value in argv):
+        return None
+    rest, _socket_overrides = strip_pairmux_globals(argv)
+    if rest and rest[0] == "--":
+        rest = rest[1:]
+    if not rest:
+        return None
+    return rest[0], rest[1:]
 
 
 def call_was_interrupted(call: dict[str, object]) -> bool:

@@ -283,48 +283,6 @@ pmx_issued_requires() {
   pmx_issued_content "$t" | grep -Eqi -- "$pat"
 }
 
-# pmx_calls_has_human_wait <pairmux-calls.jsonl> — exact, interrupted argv proof of `wait --human`.
-pmx_calls_has_human_wait() {
-  local calls="$1"
-  [ -n "$calls" ] && [ -f "$calls" ] || return 1
-  python3 - "$calls" <<'PY'
-import json
-import sys
-
-def effective_command(argv):
-    if not isinstance(argv, list) or not all(isinstance(value, str) for value in argv):
-        return None
-    index = 0
-    while index < len(argv):
-        value = argv[index]
-        if value == "--json":
-            index += 1
-        elif value == "--socket":
-            index += 2
-        elif value.startswith("--socket=") or value == "--":
-            index += 1
-        else:
-            return value, argv[index + 1:]
-    return None
-
-for line in open(sys.argv[1], encoding="utf-8"):
-    try:
-        call = json.loads(line)
-    except (json.JSONDecodeError, AttributeError):
-        continue
-    command = effective_command(call.get("argv"))
-    interrupted = (
-        call.get("harness_finalized") is True
-        or isinstance(call.get("exit_code"), int) and call["exit_code"] < 0
-        or isinstance(call.get("exit_signal"), int) and call["exit_signal"] > 0
-        or isinstance(call.get("received_signals"), list) and bool(call["received_signals"])
-    )
-    if command and command[0] == "wait" and "--human" in command[1] and interrupted:
-        raise SystemExit(0)
-raise SystemExit(1)
-PY
-}
-
 # pmx_runner_trace_proves <scenario> — in automated runs, require runner-owned exact-call proof.
 # Manual runs have no proof path and retain their outcome-only behavior.
 pmx_runner_trace_proves() {

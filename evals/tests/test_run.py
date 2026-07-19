@@ -890,6 +890,77 @@ class RunnerTests(unittest.TestCase):
                     eval_run.calls_have_human_wait([short], require_interrupted=True)
                 )
 
+    def test_pairmux_global_parser_matches_cli_order_and_sentinel_semantics(self) -> None:
+        cases = (
+            (["--json", "wait", "t"], ["wait", "t"], []),
+            (["wait", "t", "-json"], ["wait", "t"], []),
+            (["---json=ignored", "wait", "t", "--json"], ["wait", "t"], []),
+            (
+                ["wait", "t", "-socket", "one", "---socket=two"],
+                ["wait", "t"],
+                ["one", "two"],
+            ),
+            (["wait", "t", "--socket"], ["wait", "t"], []),
+            (
+                ["run", "t", "--", "echo", "--json", "--socket", "literal"],
+                ["run", "t", "--", "echo", "--json", "--socket", "literal"],
+                [],
+            ),
+            (
+                ["--socket", "--", "wait", "t", "--json"],
+                ["wait", "t"],
+                ["--"],
+            ),
+            (["wait", "t", "--unknown"], ["wait", "t", "--unknown"], []),
+        )
+        for argv, expected_rest, expected_sockets in cases:
+            with self.subTest(argv=argv):
+                rest, sockets = eval_run.strip_pairmux_globals(argv)
+                self.assertEqual(rest, expected_rest)
+                self.assertEqual(sockets, expected_sockets)
+
+        self.assertEqual(
+            eval_run.effective_pairmux_command(
+                ["--", "wait", "t", "--human", "--notify", "--json"]
+            ),
+            ("wait", ["t", "--human", "--notify", "--json"]),
+        )
+        self.assertEqual(
+            eval_run.effective_pairmux_command(
+                ["run", "t", "--", "echo", "--json", "--socket", "literal"]
+            ),
+            ("run", ["t", "--", "echo", "--json", "--socket", "literal"]),
+        )
+
+    def test_socket_override_validation_uses_the_shared_global_parser(self) -> None:
+        broker = mock.Mock()
+        broker.expected_socket = "expected"
+        accepted = (
+            ["wait", "t"],
+            ["--socket", "expected", "wait", "t"],
+            ["wait", "t", "-socket", "expected"],
+            ["wait", "t", "---socket=expected"],
+            ["wait", "t", "--socket", "expected", "-socket=expected"],
+            ["wait", "t", "--socket"],
+            ["run", "t", "--", "echo", "--socket", "forged"],
+        )
+        for argv in accepted:
+            with self.subTest(accepted=argv):
+                eval_run.PairmuxBroker._validate_socket_override(broker, argv)
+
+        rejected = (
+            ["--socket", "forged", "wait", "t"],
+            ["wait", "t", "--socket", "forged"],
+            ["wait", "t", "-socket", "forged"],
+            ["wait", "t", "---socket=forged"],
+            ["wait", "t", "--socket", "expected", "-socket", "forged"],
+            ["wait", "t", "--socket", "--", "echo"],
+        )
+        for argv in rejected:
+            with self.subTest(rejected=argv):
+                with self.assertRaisesRegex(ValueError, "overrides"):
+                    eval_run.PairmuxBroker._validate_socket_override(broker, argv)
+
     def test_s05_accepts_durable_retry_after_client_disconnect(self) -> None:
         run_secret = {"argv": ["run", "secret", "./secret.sh"], "exit_code": 0}
         disconnected = {
@@ -906,6 +977,7 @@ class RunnerTests(unittest.TestCase):
                 "--notify",
                 "--timeout",
                 "600s",
+                "--json",
             ],
             "runner_timeout_interrupted": True,
             "runner_timeout_pid_live": True,
@@ -1296,22 +1368,34 @@ class RunnerTests(unittest.TestCase):
             expected_socket="expected-socket",
         )
         broker.start()
+        forged_argv = (
+            ["--socket", "forged-socket", "ls"],
+            ["ls", "--socket", "forged-socket"],
+            ["ls", "-socket", "forged-socket"],
+            ["ls", "---socket=forged-socket"],
+        )
         try:
-            completed = subprocess.run(
-                [str(proxy), "--socket", "forged-socket", "ls"],
-                cwd=outside,
-                env=self.env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=5,
-            )
+            completed = [
+                subprocess.run(
+                    [str(proxy), *argv],
+                    cwd=outside,
+                    env=self.env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=5,
+                )
+                for argv in forged_argv
+            ]
         finally:
             trace = broker.stop_and_finalize()
-        self.assertEqual(completed.returncode, 125)
+        self.assertTrue(all(result.returncode == 125 for result in completed))
         self.assertEqual(trace.calls, [])
         self.assertEqual(trace.rejections, [])
-        self.assertIn("overrides the episode pairmux socket", " ".join(trace.errors))
+        self.assertEqual(len(trace.errors), len(forged_argv))
+        self.assertTrue(
+            all("overrides the episode pairmux socket" in error for error in trace.errors)
+        )
 
     def test_episode_audits_policy_rejection_then_passes_on_real_calls(self) -> None:
         env = self.env.copy()
