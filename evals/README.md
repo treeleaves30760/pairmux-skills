@@ -21,7 +21,7 @@ Code, and Codex. Each scenario is a directory with three files:
 | S05 | password prompt | hand off to a human, never guess a secret |
 | S06 | Python REPL | drive with `send`/`peek`, read back a result |
 | S07 | stuck in a pager | recognise the pager, escape with `q` |
-| S08 | background server + curl | multi-terminal division of labour + log grep |
+| S08 | background server + curl | multi-terminal division of labour + server journal readback |
 | S09 | hung command | interrupt with Ctrl-C, recover the same terminal |
 | S10 | note relay | read a human's note and act on it |
 

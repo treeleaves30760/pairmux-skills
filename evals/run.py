@@ -1636,23 +1636,27 @@ def validate_scenario_calls(scenario: str, calls: list[dict[str, object]]) -> li
             for client_index, client_terminal, _client_program in clients:
                 if not server_terminal or not client_terminal or server_terminal == client_terminal:
                     continue
-                for log_index, _log, log_args in matching("log"):
-                    grep_value = argument_value(log_args, "--grep")
+                for read_index, read_call, read_name, read_args in decoded:
+                    if read_call.get("exit_code") != 0 or read_name not in {"log", "peek"}:
+                        continue
+                    if read_name == "peek" and "--screen" in read_args:
+                        continue
+                    grep_value = argument_value(read_args, "--grep")
+                    relevant_log = read_name == "peek" or grep_value is None or re.search(
+                        r"GET|HTTP|(?<!\d)200(?!\d)",
+                        grep_value,
+                        re.IGNORECASE,
+                    )
                     if (
-                        command_terminal(log_args) == server_terminal
-                        and server_index < client_index < log_index
-                        and (
-                            grep_value is None
-                            or re.search(
-                                r"GET|HTTP|(?<!\d)200(?!\d)",
-                                grep_value,
-                                re.IGNORECASE,
-                            )
-                        )
+                        command_terminal(read_args) == server_terminal
+                        and server_index < client_index < read_index
+                        and relevant_log
                     ):
                         proved = True
         if not proved:
-            errors.append("server/client were not run in distinct terminals followed by server log grep")
+            errors.append(
+                "server/client were not run in distinct terminals followed by server journal readback"
+            )
     elif scenario == "S09":
         interrupted_at = [
             index

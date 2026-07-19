@@ -597,6 +597,12 @@ class RunnerTests(unittest.TestCase):
         self.assertTrue(eval_run.validate_scenario_calls("S08", calls))
         calls[-1] = {"argv": ["log", "server", "--grep", "2000"], "exit_code": 0}
         self.assertTrue(eval_run.validate_scenario_calls("S08", calls))
+        calls[-1] = {"argv": ["peek", "server"], "exit_code": 0}
+        self.assertEqual(eval_run.validate_scenario_calls("S08", calls), [])
+        calls[-1] = {"argv": ["peek", "server", "--screen"], "exit_code": 0}
+        self.assertTrue(eval_run.validate_scenario_calls("S08", calls))
+        calls[-1] = {"argv": ["peek", "client"], "exit_code": 0}
+        self.assertTrue(eval_run.validate_scenario_calls("S08", calls))
 
     def test_s09_requires_in_place_interrupt_before_recovery(self) -> None:
         recovered_in_place = [
@@ -1014,6 +1020,67 @@ class RunnerTests(unittest.TestCase):
                 self.assertEqual(completed.returncode, expected, completed.stderr)
                 if expected:
                     self.assertIn("token.txt must contain exactly", completed.stderr)
+
+    def test_s08_check_requires_agent_to_report_the_request_line(self) -> None:
+        scenario_dir = eval_run.copy_scenario("S08", self.root / "s08-check")
+        state_dir = scenario_dir / "state"
+        server_dir = state_dir / "server"
+        client_dir = state_dir / "client"
+        server_dir.mkdir(parents=True)
+        client_dir.mkdir(parents=True)
+        (server_dir / "raw.log").write_text(
+            '127.0.0.1 - - "GET / HTTP/1.1" 200 -\n', encoding="utf-8"
+        )
+        (client_dir / "raw.log").write_text("HTTP-STATUS=200\n", encoding="utf-8")
+        env_file = scenario_dir / "env.sh"
+        env_file.touch()
+        proof_path = scenario_dir / "trace-proof.json"
+        eval_run.atomic_json(
+            proof_path,
+            {
+                "schema": "pairmux.eval.trace-proof.v1",
+                "scenario": "S08",
+                "valid": True,
+                "errors": [],
+            },
+        )
+        transcript = scenario_dir / "transcript.txt"
+        env = self.env.copy()
+        env.update(
+            {
+                "PAIRMUX_EVAL_SCENARIO_DIR": str(scenario_dir),
+                "PAIRMUX_EVAL_ENV_FILE": str(env_file),
+                "PAIRMUX_EVAL_TRACE_PROOF": str(proof_path),
+                "PAIRMUX_STATE_DIR": str(state_dir),
+                "PAIRMUX_STATE_NAMESPACE": "",
+            }
+        )
+        transcript.write_text(
+            'Request: "GET / HTTP/1.1" 200 -\n', encoding="utf-8"
+        )
+        reported = subprocess.run(
+            [str(scenario_dir / "check.sh"), str(transcript)],
+            cwd=scenario_dir,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=5,
+        )
+        self.assertEqual(reported.returncode, 0, reported.stderr)
+
+        transcript.write_text("The status was 200.\n", encoding="utf-8")
+        omitted = subprocess.run(
+            [str(scenario_dir / "check.sh"), str(transcript)],
+            cwd=scenario_dir,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=5,
+        )
+        self.assertEqual(omitted.returncode, 1)
+        self.assertIn("did not report", omitted.stderr)
 
     def test_skill_tampering_fails_closed(self) -> None:
         env = self.env.copy()

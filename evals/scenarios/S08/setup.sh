@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# S08 — background server + client + log grep across two terminals.
+# S08 — background server + client + journal readback across two terminals.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCEN_DIR="${PAIRMUX_EVAL_SCENARIO_DIR:-$SCRIPT_DIR}"
