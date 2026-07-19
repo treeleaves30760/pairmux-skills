@@ -37,6 +37,7 @@ SUMMARY_SCHEMA = "pairmux.eval.summary.v1"
 CALL_SCHEMA = "pairmux.eval.call.v1"
 BROKER_REQUEST_SCHEMA = "pairmux.eval.exec.v1"
 BROKER_RESPONSE_SCHEMA = "pairmux.eval.exec-result.v1"
+BROKER_REJECTION_SCHEMA = "pairmux.eval.rejection.v1"
 BROKER_MAX_FRAME_BYTES = 32 * 1024
 SKILL_DISCOVERY_PATHS = {
     "opencode": Path(".config/opencode/skills/pairmux"),
@@ -68,6 +69,7 @@ class ProcessResult:
 class TraceResult:
     calls: list[dict[str, object]]
     errors: list[str]
+    rejections: list[dict[str, object]]
 
 
 def utc_now() -> str:
@@ -641,6 +643,102 @@ def isolated_agent_env(
     return clean
 
 
+def prepare_agent_project_isolation(
+    *, agent: str, scenario_dir: Path, env: dict[str, str]
+) -> dict[str, object]:
+    """Anchor OpenCode project discovery to the isolated scenario directory."""
+    scenario_dir = scenario_dir.resolve()
+    if agent != "opencode":
+        return {
+            "method": "process-working-directory",
+            "path": str(scenario_dir),
+            "commit": None,
+        }
+    if (scenario_dir / ".git").exists():
+        raise RuntimeError("isolated OpenCode scenario unexpectedly contains .git")
+    git = shutil.which("git", path=env.get("PATH"))
+    if not git:
+        raise RuntimeError("git is required to isolate the OpenCode project root")
+
+    git_env = env.copy()
+    git_env.update(
+        {
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_ATTR_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_AUTHOR_NAME": "pairmux-eval",
+            "GIT_AUTHOR_EMAIL": "pairmux-eval@invalid",
+            "GIT_COMMITTER_NAME": "pairmux-eval",
+            "GIT_COMMITTER_EMAIL": "pairmux-eval@invalid",
+            "GIT_AUTHOR_DATE": "2000-01-01T00:00:00+00:00",
+            "GIT_COMMITTER_DATE": "2000-01-01T00:00:00+00:00",
+        }
+    )
+
+    def run_git(*arguments: str) -> str:
+        try:
+            completed = subprocess.run(
+                [git, *arguments],
+                cwd=scenario_dir,
+                env=git_env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise RuntimeError(f"cannot initialize isolated OpenCode project: {error}") from error
+        if completed.returncode != 0:
+            detail = completed.stderr.strip() or completed.stdout.strip()
+            raise RuntimeError(
+                f"cannot initialize isolated OpenCode project: {detail or completed.returncode}"
+            )
+        return completed.stdout.strip()
+
+    template_dir = Path(env["HOME"]) / ".pairmux-eval-empty-git-template"
+    template_dir.mkdir(parents=True, exist_ok=True)
+    run_git(
+        "-c",
+        "init.defaultBranch=pairmux-eval",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "init",
+        "--quiet",
+        f"--template={template_dir}",
+        ".",
+    )
+    run_git("add", "--all", "--force")
+    run_git(
+        "-c",
+        "core.hooksPath=/dev/null",
+        "commit",
+        "--quiet",
+        "--no-gpg-sign",
+        "--no-verify",
+        "--allow-empty",
+        "-m",
+        "pairmux eval fixture",
+    )
+    project_root = Path(run_git("rev-parse", "--show-toplevel")).resolve()
+    if project_root != scenario_dir:
+        raise RuntimeError(
+            f"isolated OpenCode project resolved to {project_root}, expected {scenario_dir}"
+        )
+    commit = run_git("rev-parse", "HEAD")
+    if not re.fullmatch(r"[0-9a-f]{40,64}", commit):
+        raise RuntimeError("isolated OpenCode project returned an invalid commit id")
+    status = run_git("status", "--porcelain", "--untracked-files=all")
+    if status:
+        raise RuntimeError(f"isolated OpenCode project is dirty after commit: {status}")
+    return {
+        "method": "nested-committed-git-root",
+        "path": str(project_root),
+        "commit": commit,
+    }
+
+
 def make_read_only_tree(root: Path) -> None:
     for path in sorted(root.rglob("*"), reverse=True):
         if path.is_symlink():
@@ -745,6 +843,25 @@ class BrokerExecution:
     cancel_reason: str | None = None
 
 
+class BrokerPolicyRejection(Exception):
+    """A safely denied request that never reached the fixed pairmux binary."""
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        requested_cwd: str,
+        resolved_cwd: Path,
+        allowed_cwd: Path,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.requested_cwd = requested_cwd
+        self.resolved_cwd = resolved_cwd
+        self.allowed_cwd = allowed_cwd
+
+
 class PairmuxBroker:
     """Runner-owned execution boundary and authoritative in-memory call ledger."""
 
@@ -757,7 +874,7 @@ class PairmuxBroker:
         fixed_env: dict[str, str],
         allowed_cwd: Path,
         expected_socket: str,
-        max_calls: int = 256,
+        max_requests: int = 256,
     ) -> None:
         if os.name != "posix" or not hasattr(socket, "SCM_RIGHTS"):
             raise RuntimeError("pairmux eval broker requires Unix descriptor passing")
@@ -767,15 +884,17 @@ class PairmuxBroker:
         self.fixed_env = fixed_env.copy()
         self.allowed_cwd = allowed_cwd.resolve()
         self.expected_socket = expected_socket
-        self.max_calls = max_calls
+        self.max_requests = max_requests
         self._lock = threading.Lock()
         self._closing = threading.Event()
         self._listener: socket.socket | None = None
         self._listener_thread: threading.Thread | None = None
         self._handler_threads: list[threading.Thread] = []
         self._active: dict[str, BrokerExecution] = {}
+        self._request_count = 0
         self._calls: list[dict[str, object]] = []
         self._errors: list[str] = []
+        self._rejections: list[dict[str, object]] = []
         self._final: TraceResult | None = None
 
     def start(self) -> None:
@@ -911,11 +1030,20 @@ class PairmuxBroker:
             raise
 
     def _validated_cwd(self, requested: str) -> Path:
-        resolved = Path(requested).resolve(strict=True)
+        path = Path(requested)
+        if not path.is_absolute():
+            raise ValueError("broker cwd must be absolute")
+        resolved = path.resolve(strict=True)
         if not resolved.is_dir():
             raise ValueError("broker cwd is not a directory")
         if os.path.commonpath((str(self.allowed_cwd), str(resolved))) != str(self.allowed_cwd):
-            raise ValueError("broker cwd escapes the episode work root")
+            raise BrokerPolicyRejection(
+                "cwd-outside-work-root",
+                "broker cwd escapes the episode work root",
+                requested_cwd=requested,
+                resolved_cwd=resolved,
+                allowed_cwd=self.allowed_cwd,
+            )
         return resolved
 
     def _validate_socket_override(self, argv: list[str]) -> None:
@@ -1001,16 +1129,19 @@ class PairmuxBroker:
     def _handle_connection(self, connection: socket.socket) -> None:
         descriptors: list[int] = []
         execution: BrokerExecution | None = None
+        peer_pid: int | None = None
+        peer_uid: int | None = None
+        request: dict[str, object] | None = None
         try:
             peer_pid, peer_uid = self._peer_credentials(connection)
             if peer_uid != os.geteuid():
                 raise ValueError(f"broker peer uid {peer_uid} does not match runner uid")
             request, descriptors = self._recv_request(connection)
             with self._lock:
-                if len(self._calls) >= self.max_calls:
-                    raise ValueError("broker call limit exceeded")
+                if self._request_count >= self.max_requests:
+                    raise ValueError("broker request limit exceeded")
+                self._request_count += 1
             argv = list(request["argv"])
-            cwd = self._validated_cwd(str(request["cwd"]))
             self._validate_socket_override(argv)
             if sha256_file(self.real_pairmux) != self.real_pairmux_sha256:
                 raise RuntimeError("broker real pairmux hash changed before execution")
@@ -1018,6 +1149,7 @@ class PairmuxBroker:
                 client_process_group = os.getpgid(peer_pid)
             except (ProcessLookupError, PermissionError):
                 raise ValueError("broker peer process is not live") from None
+            cwd = self._validated_cwd(str(request["cwd"]))
 
             started_at = utc_now()
             started_ns = time.time_ns()
@@ -1119,6 +1251,27 @@ class PairmuxBroker:
             except OSError:
                 pass
             monitor.join(1.0)
+        except BrokerPolicyRejection as error:
+            rejection = {
+                "schema": BROKER_REJECTION_SCHEMA,
+                "code": error.code,
+                "message": str(error),
+                "requested_cwd": error.requested_cwd,
+                "resolved_cwd": str(error.resolved_cwd),
+                "allowed_cwd": str(error.allowed_cwd),
+                "argv": list(request["argv"]) if request is not None else [],
+                "executed": False,
+                "client_pid": peer_pid,
+                "client_uid": peer_uid,
+                "observed_at": utc_now(),
+                "observed_at_unix_ns": time.time_ns(),
+            }
+            with self._lock:
+                self._rejections.append(rejection)
+            try:
+                self._send_result(connection, 125, str(error))
+            except OSError:
+                pass
         except (json.JSONDecodeError, OSError, RuntimeError, ValueError) as error:
             self._error(f"broker protocol error: {error}")
             try:
@@ -1199,11 +1352,15 @@ class PairmuxBroker:
         with self._lock:
             calls = copy.deepcopy(self._calls)
             errors = list(self._errors)
+            rejections = copy.deepcopy(self._rejections)
         calls.sort(key=lambda item: (int(item["started_at_unix_ns"]), str(item["id"])))
+        rejections.sort(
+            key=lambda item: (int(item["observed_at_unix_ns"]), str(item["code"]))
+        )
         for call in calls:
             if call.get("exit_code") is None:
                 errors.append(f"broker call was not reaped: {call['id']}")
-        self._final = TraceResult(calls, errors)
+        self._final = TraceResult(calls=calls, errors=errors, rejections=rejections)
         return self._final
 
 
@@ -1211,6 +1368,16 @@ def write_broker_calls(destination: Path, calls: list[dict[str, object]]) -> Non
     destination.parent.mkdir(parents=True, exist_ok=True)
     with destination.open("w", encoding="utf-8") as stream:
         for record in calls:
+            json.dump(record, stream, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+            stream.write("\n")
+
+
+def write_broker_rejections(
+    destination: Path, rejections: list[dict[str, object]]
+) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open("w", encoding="utf-8") as stream:
+        for record in rejections:
             json.dump(record, stream, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
             stream.write("\n")
 
@@ -1696,10 +1863,17 @@ def run_episode(
     check_result: ProcessResult | None = None
     transcript_path = evidence_dir / "transcript.jsonl"
     calls_path = evidence_dir / "pairmux-calls.jsonl"
+    rejections_path = evidence_dir / "broker-rejections.jsonl"
     proof_path = evidence_dir / "trace-proof.json"
     calls: list[dict[str, object]] = []
+    rejections: list[dict[str, object]] = []
     trace_errors: list[str] = []
     scenario_trace_errors: list[str] = []
+    project_isolation: dict[str, object] = {
+        "method": "not-run",
+        "path": str(scenario_dir),
+        "commit": None,
+    }
     discovery: dict[str, object] = {
         "verified": False,
         "method": "not-run",
@@ -1713,6 +1887,12 @@ def run_episode(
             control_hashes[env_file] = sha256_file(env_file)
             env_file.chmod(0o444)
             verify_hashes(control_hashes)
+
+            project_isolation = prepare_agent_project_isolation(
+                agent=agent,
+                scenario_dir=scenario_dir,
+                env=clean_env,
+            )
 
             discovery = verify_skill_discovery(
                 agent=agent,
@@ -1776,7 +1956,9 @@ def run_episode(
                 trace = broker.stop_and_finalize()
             calls = trace.calls
             trace_errors = trace.errors
+            rejections = trace.rejections
             write_broker_calls(calls_path, calls)
+            write_broker_rejections(rejections_path, rejections)
             if not skill_dir.is_dir() or sha256_tree(skill_dir) != skill_tree_sha256:
                 trace_errors.append("installed skill changed while the agent was running")
             scenario_trace_errors = validate_scenario_calls(scenario, calls)
@@ -1807,6 +1989,7 @@ def run_episode(
         else:
             transcript_path.touch()
             calls_path.touch()
+            rejections_path.touch()
     finally:
         if broker is not None:
             broker.stop_and_finalize()
@@ -1822,6 +2005,7 @@ def run_episode(
             "cleanup.log",
             "transcript.jsonl",
             "pairmux-calls.jsonl",
+            "broker-rejections.jsonl",
             "trace-proof.json",
             "skill-discovery.log",
         ):
@@ -1844,7 +2028,10 @@ def run_episode(
             "proxy_trace_transport": "runner-owned-execution-broker",
             "broker_ledger_serialized_after_agent": True,
             "broker_request_can_report_evidence": False,
+            "broker_denied_cwd_requests_are_audited": True,
+            "nonfatal_broker_policy_rejection_codes": ["cwd-outside-work-root"],
             "host_home_inherited": False,
+            "agent_project_isolation": project_isolation,
             "skill_discovery_path": skill_discovery_path,
             "skill_tree_sha256": skill_tree_sha256,
             "control_source_sha256": {
@@ -1927,12 +2114,17 @@ def run_episode(
             "artifact": relative(artifact_root / "control-manifest.json", run_root),
             "activation_paths_removed": True,
         },
+        "agent_project_isolation": project_isolation,
+        "broker_policy_rejections": len(rejections),
         "trace_validation_errors": trace_errors,
         "scenario_trace_errors": scenario_trace_errors,
         "paths": {
             "episode": relative(episode_root, run_root),
             "transcript": relative(episode_root / "transcript.jsonl", run_root),
             "pairmux_calls": relative(episode_root / "pairmux-calls.jsonl", run_root),
+            "broker_rejections": relative(
+                episode_root / "broker-rejections.jsonl", run_root
+            ),
             "check_stdout": relative(episode_root / "check.stdout.log", run_root),
             "check_stderr": relative(episode_root / "check.stderr.log", run_root),
             "control_manifest": relative(artifact_root / "control-manifest.json", run_root),
@@ -2042,6 +2234,9 @@ def summarize(
             "passed": scenario_passed,
             "pass_rate": round(scenario_passed / len(items), 6),
             "steps": sum(int(item["steps"]) for item in items),
+            "broker_policy_rejections": sum(
+                int(item["broker_policy_rejections"]) for item in items
+            ),
             "wall_time_seconds": round(sum(float(item["wall_time_seconds"]) for item in items), 6),
         }
     summary: dict[str, object] = {
@@ -2068,6 +2263,9 @@ def summarize(
             "failed": total - passed,
             "pass_rate": round(passed / total, 6) if total else 0.0,
             "steps": sum(int(item["steps"]) for item in results),
+            "broker_policy_rejections": sum(
+                int(item["broker_policy_rejections"]) for item in results
+            ),
         },
         "scenarios": scenarios,
         "results": results,
@@ -2105,19 +2303,21 @@ def write_summary_markdown(path: Path, summary: dict[str, object]) -> None:
         f"- Pairmux binary: `{summary['pairmux_path']}` (`{summary['pairmux_sha256']}`)",
         f"- Skill tree: `{summary['skill_tree_sha256']}`",
         f"- Result: **{totals['passed']}/{totals['episodes']} passed** ({float(totals['pass_rate']) * 100:.1f}%)",
+        f"- Broker policy rejections: {totals['broker_policy_rejections']}",
         f"- Wall time: {float(summary['wall_time_seconds']):.3f}s",
         f"- Acceptance eligible: **{str(bool(summary['acceptance']['eligible'])).lower()}** "
         f"(`{summary['acceptance']['profile']}`)",
         "",
-        "| scenario | repeat | result | steps | wall time | failure class |",
-        "|---|---:|---|---:|---:|---|",
+        "| scenario | repeat | result | executed steps | policy rejections | wall time | failure class |",
+        "|---|---:|---|---:|---:|---:|---|",
     ]
     for item in results:
         status = str(item.get("outcome", "passed" if item["pass"] else "failed"))
         failure = item["failure_class"] or "-"
         lines.append(
             f"| {item['scenario']} | {item['repeat']} | {status} | {item['steps']} | "
-            f"{float(item['wall_time_seconds']):.3f}s | {failure} |"
+            f"{item['broker_policy_rejections']} | {float(item['wall_time_seconds']):.3f}s | "
+            f"{failure} |"
         )
     lines.append("")
     path.write_text("\n".join(lines), encoding="utf-8")

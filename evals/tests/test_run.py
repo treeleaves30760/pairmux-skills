@@ -129,6 +129,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(completed.stdout.strip(), "broker stdout preserved")
         self.assertEqual(completed.stderr.strip(), "broker stderr preserved")
         self.assertEqual(trace.errors, [])
+        self.assertEqual(trace.rejections, [])
         self.assertEqual(len(trace.calls), 1)
         record = trace.calls[0]
         self.assertEqual(record["argv"], argv)
@@ -282,6 +283,7 @@ class RunnerTests(unittest.TestCase):
                 self.assertTrue(result["pass"])
                 self.assertEqual(result["steps"], 2)
                 self.assertEqual(result["failure_class"], None)
+                self.assertEqual(result["broker_policy_rejections"], 0)
                 self.assertEqual(result["agent_version"], f"{agent} mock-1.0")
                 self.assertEqual(result["model"], "default")
                 self.assertEqual(result["pairmux_path"], str((self.bin_dir / "pairmux").resolve()))
@@ -310,6 +312,39 @@ class RunnerTests(unittest.TestCase):
                         Path(argv[argv.index("--dir") + 1]).resolve(), scenario_dir.resolve()
                     )
                     self.assertEqual(invocation["opencode_disable_project_config"], "1")
+                    self.assertTrue((scenario_dir / ".git").is_dir())
+                    self.assertEqual(
+                        Path(result["agent_project_isolation"]["path"]).resolve(),
+                        scenario_dir.resolve(),
+                    )
+                    self.assertEqual(
+                        result["agent_project_isolation"]["method"],
+                        "nested-committed-git-root",
+                    )
+                    self.assertRegex(
+                        str(result["agent_project_isolation"]["commit"]),
+                        r"^[0-9a-f]{40}$",
+                    )
+                    git_head = subprocess.run(
+                        ["git", "-C", str(scenario_dir), "rev-parse", "HEAD"],
+                        check=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        timeout=5,
+                    ).stdout.strip()
+                    self.assertEqual(
+                        result["agent_project_isolation"]["commit"], git_head
+                    )
+                    git_status = subprocess.run(
+                        ["git", "-C", str(scenario_dir), "status", "--porcelain"],
+                        check=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        timeout=5,
+                    ).stdout
+                    self.assertEqual(git_status, "")
                 elif agent == "claude":
                     self.assertEqual(argv[argv.index("--output-format") + 1], "stream-json")
                 else:
@@ -319,6 +354,8 @@ class RunnerTests(unittest.TestCase):
 
                 calls_path = run_root / result["paths"]["pairmux_calls"]
                 calls = [json.loads(line) for line in calls_path.read_text(encoding="utf-8").splitlines()]
+                rejections_path = run_root / result["paths"]["broker_rejections"]
+                self.assertEqual(rejections_path.read_text(encoding="utf-8"), "")
                 self.assertEqual(calls[0]["argv"], ["new", "--name", "mock"])
                 self.assertEqual(
                     calls[1]["argv"],
@@ -650,6 +687,7 @@ class RunnerTests(unittest.TestCase):
             trace = broker.stop_and_finalize()
         self.assertEqual(trace.calls, [])
         self.assertTrue(trace.errors)
+        self.assertEqual(trace.rejections, [])
 
         env = self.env.copy()
         env["PAIRMUX_MOCK_MODE"] = "forge_trace_file"
@@ -686,6 +724,143 @@ class RunnerTests(unittest.TestCase):
         _run_root, result = self.result_for(completed)
         self.assertEqual(result["steps"], 2)
         self.assertIn("broker protocol error", " ".join(result["trace_validation_errors"]))
+
+    def test_broker_audits_out_of_root_cwd_and_allows_recovery(self) -> None:
+        runtime = Path(tempfile.mkdtemp(prefix="pmx-policy-", dir="/tmp")).resolve()
+        self.addCleanup(shutil.rmtree, runtime, True)
+        proxy = runtime / "bin" / "pairmux"
+        proxy.parent.mkdir(parents=True)
+        shutil.copy2(EVALS_DIR / "pairmux_proxy.py", proxy)
+        proxy.chmod(0o755)
+        real = runtime / "real-pairmux"
+        shutil.copy2(self.bin_dir / "pairmux", real)
+        real.chmod(0o755)
+        allowed = self.root / "allowed"
+        outside = self.root / "outside"
+        allowed.mkdir()
+        outside.mkdir()
+        broker = eval_run.PairmuxBroker(
+            runtime / "broker.sock",
+            real_pairmux=real,
+            real_pairmux_sha256=eval_run.sha256_file(real),
+            fixed_env=self.env,
+            allowed_cwd=allowed,
+            expected_socket="policy-test",
+        )
+        with self.assertRaisesRegex(ValueError, "must be absolute"):
+            broker._validated_cwd(".")
+        broker.start()
+        try:
+            denied = subprocess.run(
+                [str(proxy), "mock-fail"],
+                cwd=outside,
+                env=self.env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=5,
+            )
+            recovered = subprocess.run(
+                [str(proxy), "mock-fail"],
+                cwd=allowed,
+                env=self.env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=5,
+            )
+        finally:
+            trace = broker.stop_and_finalize()
+        self.assertEqual(denied.returncode, 125)
+        self.assertIn("cwd escapes", denied.stderr)
+        self.assertEqual(recovered.returncode, 23)
+        self.assertEqual(trace.errors, [])
+        self.assertEqual(len(trace.calls), 1)
+        self.assertEqual(len(trace.rejections), 1)
+        rejection = trace.rejections[0]
+        self.assertEqual(rejection["schema"], eval_run.BROKER_REJECTION_SCHEMA)
+        self.assertEqual(rejection["code"], "cwd-outside-work-root")
+        self.assertEqual(Path(rejection["requested_cwd"]).resolve(), outside.resolve())
+        self.assertEqual(rejection["argv"], ["mock-fail"])
+
+    def test_broker_keeps_socket_override_fatal_for_out_of_root_cwd(self) -> None:
+        runtime = Path(tempfile.mkdtemp(prefix="pmx-policy-order-", dir="/tmp")).resolve()
+        self.addCleanup(shutil.rmtree, runtime, True)
+        proxy = runtime / "bin" / "pairmux"
+        proxy.parent.mkdir(parents=True)
+        shutil.copy2(EVALS_DIR / "pairmux_proxy.py", proxy)
+        proxy.chmod(0o755)
+        real = runtime / "real-pairmux"
+        shutil.copy2(self.bin_dir / "pairmux", real)
+        real.chmod(0o755)
+        allowed = self.root / "fatal-allowed"
+        outside = self.root / "fatal-outside"
+        allowed.mkdir()
+        outside.mkdir()
+        broker = eval_run.PairmuxBroker(
+            runtime / "broker.sock",
+            real_pairmux=real,
+            real_pairmux_sha256=eval_run.sha256_file(real),
+            fixed_env=self.env,
+            allowed_cwd=allowed,
+            expected_socket="expected-socket",
+        )
+        broker.start()
+        try:
+            completed = subprocess.run(
+                [str(proxy), "--socket", "forged-socket", "ls"],
+                cwd=outside,
+                env=self.env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=5,
+            )
+        finally:
+            trace = broker.stop_and_finalize()
+        self.assertEqual(completed.returncode, 125)
+        self.assertEqual(trace.calls, [])
+        self.assertEqual(trace.rejections, [])
+        self.assertIn("overrides the episode pairmux socket", " ".join(trace.errors))
+
+    def test_episode_audits_policy_rejection_then_passes_on_real_calls(self) -> None:
+        env = self.env.copy()
+        env["PAIRMUX_MOCK_MODE"] = "policy_rejection_then_pass"
+        completed = self.invoke(
+            "--agent",
+            "opencode",
+            "--scenario",
+            "S01",
+            "--timeout",
+            "5",
+            "--output-dir",
+            str(self.root / "policy-recovery-runs"),
+            env=env,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        run_root, result = self.result_for(completed)
+        self.assertTrue(result["pass"])
+        self.assertEqual(result["steps"], 2)
+        self.assertEqual(result["broker_policy_rejections"], 1)
+        self.assertEqual(result["trace_validation_errors"], [])
+        rejections = [
+            json.loads(line)
+            for line in (run_root / result["paths"]["broker_rejections"])
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        self.assertEqual(len(rejections), 1)
+        self.assertEqual(rejections[0]["code"], "cwd-outside-work-root")
+        self.assertFalse(rejections[0]["executed"])
+        self.assertTrue(Path(rejections[0]["resolved_cwd"]).is_absolute())
+        self.assertTrue(Path(rejections[0]["allowed_cwd"]).is_absolute())
+        summary = json.loads((run_root / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["totals"]["broker_policy_rejections"], 1)
+        self.assertEqual(summary["scenarios"]["S01"]["broker_policy_rejections"], 1)
+        self.assertIn(
+            "Broker policy rejections: 1",
+            (run_root / "summary.md").read_text(encoding="utf-8"),
+        )
 
     def test_agent_environment_and_control_assets_are_isolated(self) -> None:
         host_home = self.root / "host-home"
@@ -729,6 +904,69 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(manifest["proxy_trace_transport"], "runner-owned-execution-broker")
         self.assertTrue(manifest["broker_ledger_serialized_after_agent"])
         self.assertFalse(manifest["broker_request_can_report_evidence"])
+        self.assertTrue(manifest["broker_denied_cwd_requests_are_audited"])
+        self.assertEqual(
+            manifest["nonfatal_broker_policy_rejection_codes"],
+            ["cwd-outside-work-root"],
+        )
+        self.assertEqual(
+            manifest["agent_project_isolation"]["method"],
+            "nested-committed-git-root",
+        )
+
+    def test_s10_accepts_exact_token_with_optional_single_newline(self) -> None:
+        cases = (
+            (b"ZT-9QK", 0),
+            (b"ZT-9QK\n", 0),
+            (b"ZT-9QK\n\n", 1),
+            (b"ZT-9QK\r\n", 1),
+            (b"ZT-9QK ", 1),
+        )
+        for index, (content, expected) in enumerate(cases):
+            with self.subTest(content=content):
+                scenario_dir = eval_run.copy_scenario(
+                    "S10", self.root / f"s10-check-{index}"
+                )
+                state_dir = scenario_dir / "state"
+                terminal_dir = state_dir / "handoff"
+                terminal_dir.mkdir(parents=True)
+                (terminal_dir / "index.jsonl").write_text(
+                    '{"text":"ZT-9QK"}\n', encoding="utf-8"
+                )
+                (scenario_dir / "token.txt").write_bytes(content)
+                env_file = scenario_dir / "env.sh"
+                env_file.touch()
+                proof_path = scenario_dir / "trace-proof.json"
+                eval_run.atomic_json(
+                    proof_path,
+                    {
+                        "schema": "pairmux.eval.trace-proof.v1",
+                        "scenario": "S10",
+                        "valid": True,
+                        "errors": [],
+                    },
+                )
+                env = self.env.copy()
+                env.update(
+                    {
+                        "PAIRMUX_EVAL_SCENARIO_DIR": str(scenario_dir),
+                        "PAIRMUX_EVAL_ENV_FILE": str(env_file),
+                        "PAIRMUX_EVAL_TRACE_PROOF": str(proof_path),
+                        "PAIRMUX_STATE_DIR": str(state_dir),
+                    }
+                )
+                completed = subprocess.run(
+                    [str(scenario_dir / "check.sh")],
+                    cwd=scenario_dir,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=5,
+                )
+                self.assertEqual(completed.returncode, expected, completed.stderr)
+                if expected:
+                    self.assertIn("token.txt must contain exactly", completed.stderr)
 
     def test_skill_tampering_fails_closed(self) -> None:
         env = self.env.copy()

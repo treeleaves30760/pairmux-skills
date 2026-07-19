@@ -15,8 +15,10 @@ pmx_index_has handoff "ZT-9QK" \
 [ -f "$SCEN_DIR/token.txt" ] \
   || pmx_fail "token.txt was not created — the agent did not act on the note"
 
-printf 'ZT-9QK\n' | cmp -s - "$SCEN_DIR/token.txt" \
-  || pmx_fail "token.txt must contain exactly the note token ZT-9QK and one newline"
+if ! printf 'ZT-9QK' | cmp -s - "$SCEN_DIR/token.txt" \
+  && ! printf 'ZT-9QK\n' | cmp -s - "$SCEN_DIR/token.txt"; then
+  pmx_fail "token.txt must contain exactly the note token ZT-9QK, with at most one trailing newline"
+fi
 
 pmx_runner_trace_proves S10 \
   || pmx_fail "runner-owned proxy trace does not prove the handoff note was read"

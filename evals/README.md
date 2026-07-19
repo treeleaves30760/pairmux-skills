@@ -85,7 +85,7 @@ The adapters deliberately use stable, non-interactive output modes:
 
 | agent | runner invocation details |
 |---|---|
-| OpenCode | `--pure --auto run --format json` |
+| OpenCode | `--pure --auto run --format json --dir <isolated-scenario>` |
 | Claude Code | `-p --allowedTools Bash --setting-sources project --strict-mcp-config --output-format stream-json` |
 | Codex | `exec --sandbox <mode> --ephemeral --json`; default sandbox is `danger-full-access` |
 
@@ -115,6 +115,9 @@ after the agent process group has ended. Each episode gets:
   `$HOME/.agents/skills/pairmux`, with discovery path and hashes in the result;
 - OpenCode external-skill discovery disabled, Claude limited to project setting sources, and Codex
   given both isolated `HOME` and `CODEX_HOME`;
+- an OpenCode scenario initialized as its own clean committed nested Git repository, with host Git
+  config, attributes, templates, and hooks disabled, so both `--dir` and project-root discovery
+  resolve to the isolated scenario rather than the benchmark checkout;
 - model-free OpenCode `debug skill` / Codex `debug prompt-input` discovery preflights (mock runs use
   an explicit mock contract); missing or leaked host paths fail closed;
 - a unique `PAIRMUX_SOCKET`, `PAIRMUX_STATE_DIR`, and episode id;
@@ -127,14 +130,19 @@ uses kernel peer credentials, a fixed private binary and episode environment, th
 child PID, timestamps, and `waitpid` result in runner memory. It passes stdin/stdout/stderr file
 descriptors over the Unix stream socket, so pairmux keeps its normal output behavior without bounded
 proxy buffers. A direct broker request still causes a real fixed-binary execution; client-reported
-PID, status, or finish fields are rejected and any protocol error fails the episode. The ledger is
-serialized only after the agent process group has ended and never scans agent JSON files.
+PID, status, or finish fields are rejected and any protocol error fails the episode. A valid request
+whose absolute cwd resolves outside the episode work root is denied before execution with exit 125
+and written to a separate policy-rejection audit ledger; it is not execution evidence and does not
+invalidate a later valid call. Relative/nonexistent cwd values, malformed fields, socket overrides,
+descriptor errors, changed binaries, and all other protocol failures remain fatal. The ledgers are
+serialized only after the agent process group has ended and never scan agent JSON files.
 
 Scenario proofs combine exact broker argv/order/terminal binding with isolated terminal state;
 marker-only files cannot pass. The host binary path and broker environment are not present in the
-agent environment. Setup/check bypass the broker, so `steps` counts only agent calls. This is a
-fail-closed evidence boundary for cooperative benchmark agents, not hostile same-UID isolation; a
-hostile process still requires a separate UID, container, or VM.
+agent environment. Setup/check bypass the broker, so `steps` counts only broker-executed agent
+pairmux calls; safely denied cwd requests are reported separately in each episode, scenario, and run
+total. This is a fail-closed evidence boundary for cooperative benchmark agents, not hostile
+same-UID isolation; a hostile process still requires a separate UID, container, or VM.
 
 Run directories are collision-resistant across simultaneous runners and reruns:
 
@@ -147,6 +155,7 @@ evals/runs/<run-id>/
     ├── result.json
     ├── transcript.jsonl
     ├── pairmux-calls.jsonl
+    ├── broker-rejections.jsonl
     ├── setup.*.log / agent.stderr.log / check.*.log
     ├── runner-artifacts/{control-manifest.json,skill/,state/,env.sh}
     └── work/
@@ -154,7 +163,8 @@ evals/runs/<run-id>/
 
 `results.jsonl` has one `pairmux.eval.episode.v1` object per episode. Required score fields include
 agent/version/provider/model, scenario/repeat, pass/outcome, steps, wall time, failure class, resolved
-binary path/hash, skill discovery/hashes, git dirty/commit data, and fixture hashes. `summary.json` is
+binary path/hash, skill discovery/hashes, nested project isolation, policy-rejection count, git
+dirty/commit data, and fixture hashes. `summary.json` is
 the aggregate `pairmux.eval.summary.v1` document and includes the explicit acceptance decision;
 `summary.md` is its review-friendly table. Failure classes distinguish setup, agent, timeout, check,
 and internal runner failures. Exit 0 means every episode passed and any requested P4 profile is
@@ -200,8 +210,9 @@ shellcheck evals/lib.sh evals/scenarios/*/{setup,check}.sh
 
 ## Scoring
 
-Per scenario, record **pass/fail** and the **step count** from the broker (lower is better for the same
-outcome). Aggregate repeated episodes as a pass rate across S01–S10. Log benchmark runs in
+Per scenario, record **pass/fail**, the **executed step count**, and **policy rejection count** from
+the broker (lower is better for the same outcome). Aggregate repeated episodes as a pass rate across
+S01–S10. Log benchmark runs in
 [`RESULTS.md`](RESULTS.md) and retain the generated `summary.json`/`summary.md` as evidence.
 
 ## Acceptance (from the P4 contract)

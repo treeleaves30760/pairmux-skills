@@ -259,6 +259,12 @@ def run_agent(program: str, args: list[str]) -> int:
         )
         emit_transcript(program)
         return 0
+    if mode == "policy_rejection_then_pass":
+        subprocess.run(
+            ["pairmux", "ls"],
+            cwd=Path.cwd().parents[1],
+            check=False,
+        )
 
     pairmux("new", "--name", "mock")
     pairmux("run", "mock", "printf '%s\\n' PAIRMUX-S01-OK")
