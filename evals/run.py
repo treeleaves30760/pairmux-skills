@@ -42,6 +42,7 @@ BROKER_REJECTION_SCHEMA = "pairmux.eval.rejection.v1"
 BROKER_MAX_FRAME_BYTES = 32 * 1024
 EARLY_FAILURE_TAIL_BYTES = 64 * 1024
 OPENCODE_AUTH_MAX_BYTES = 1024 * 1024
+OPENCODE_AUTH_ENV_BY_PROVIDER = {"huggingface": "HF_TOKEN"}
 RUN_FATAL_FAILURE_CLASSES = frozenset(
     {
         "control_cleanup_failed",
@@ -255,6 +256,11 @@ def parent_process_id(process_id: int) -> int | None:
         completed = subprocess.run(
             [ps, "-o", "ppid=", "-p", str(process_id)],
             check=False,
+            env={
+                name: value
+                for name, value in os.environ.items()
+                if name in {"PATH", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "LC_CTYPE"}
+            },
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
@@ -327,21 +333,26 @@ def opencode_provider_failure(stderr_tail: str) -> str | None:
         if "level=ERROR" not in line or 'message="stream error"' not in line:
             continue
         if re.search(
-            r"(?:FreeUsageLimitError|AI_(?:APICall|Retry)Error:[^\n]*Rate limit exceeded)",
+            r"(?:FreeUsageLimitError|AI_(?:APICall|Retry)Error:[^\n]*(?:"
+            r"Rate limit exceeded|Too Many Requests|"
+            r"status(?:[ _-]?code)?\s*[:=]\s*429))",
             line,
             re.IGNORECASE,
         ):
             return "provider_rate_limited"
         if re.search(
-            r"(?:ProviderAuthError|AI_APICallError:[^\n]*(?:Unauthorized|Forbidden|"
-            r"Invalid API key|Authentication failed|status(?: code)?[=: ]+(?:401|403)))",
+            r"(?:ProviderAuthError|AI_(?:APICall|Retry)Error:[^\n]*(?:"
+            r"Unauthorized|Forbidden|Invalid API key|Authentication failed|"
+            r"Invalid username or password|"
+            r"status(?:[ _-]?code)?\s*[:=]\s*(?:401|403)))",
             line,
             re.IGNORECASE,
         ):
             return "provider_auth_failed"
         if re.search(
-            r"AI_RetryError:[^\n]*(?:Service Unavailable|Bad Gateway|Gateway Timeout|"
-            r"Internal Server Error|status(?: code)?[=: ]+5\d\d)",
+            r"AI_(?:APICall|Retry)Error:[^\n]*(?:Service Unavailable|Bad Gateway|"
+            r"Gateway Timeout|Internal Server Error|"
+            r"status(?:[ _-]?code)?\s*[:=]\s*5\d\d)",
             line,
             re.IGNORECASE,
         ):
@@ -483,9 +494,36 @@ def run_process(
                 stderr_stream.close()
 
 
-def probe_version(executable: str) -> str:
+def isolated_version_probe_env(source: dict[str, str], isolated_home: Path) -> dict[str, str]:
+    allowed = {
+        "PATH",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TERM",
+        "NO_COLOR",
+        "PAIRMUX_MOCK_VERSION_LOG",
+    }
+    clean = {name: value for name, value in source.items() if name in allowed}
+    clean["HOME"] = str(isolated_home)
+    clean["XDG_CONFIG_HOME"] = str(isolated_home / ".config")
+    clean["XDG_CACHE_HOME"] = str(isolated_home / ".cache")
+    clean["XDG_DATA_HOME"] = str(isolated_home / ".local/share")
+    clean["XDG_STATE_HOME"] = str(isolated_home / ".local/state")
+    clean["OPENCODE_CONFIG_DIR"] = str(isolated_home / ".config/opencode")
+    clean["OPENCODE_DISABLE_EXTERNAL_SKILLS"] = "1"
+    clean["OPENCODE_DISABLE_PROJECT_CONFIG"] = "1"
+    return clean
+
+
+def probe_version(executable: str, *, env: dict[str, str], cwd: Path) -> str:
     process = subprocess.Popen(
         [executable, "--version"],
+        cwd=cwd,
+        env=env,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -545,9 +583,24 @@ def sha256_tree(root: Path) -> str:
 
 
 def git_provenance(root: Path = EVALS_DIR.parent) -> dict[str, object]:
+    git_env = {
+        name: value
+        for name, value in os.environ.items()
+        if name in {"PATH", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "LC_CTYPE"}
+    }
+    git_env.update(
+        {
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_ATTR_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+    )
+
     def git(*arguments: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["git", "-C", str(root), *arguments],
+            env=git_env,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -638,6 +691,22 @@ def load_opencode_api_auth(path: Path, provider: str) -> dict[str, object]:
     key = record.get("key")
     if record.get("type") != "api" or not isinstance(key, str) or not key:
         raise ValueError("selected OpenCode credential must be a non-empty api record")
+    return {provider: {"type": "api", "key": key}}
+
+
+def load_opencode_api_auth_env(
+    source: dict[str, str], environment_name: str, provider: str
+) -> dict[str, object]:
+    expected_name = OPENCODE_AUTH_ENV_BY_PROVIDER.get(provider)
+    if expected_name is None:
+        raise ValueError("--opencode-auth-env is unsupported for the selected model provider")
+    if environment_name != expected_name:
+        raise ValueError(
+            f"--opencode-auth-env for provider {provider!r} must be {expected_name}"
+        )
+    key = source.get(environment_name)
+    if not key or key != key.strip():
+        raise ValueError(f"--opencode-auth-env {environment_name} is missing, empty, or padded")
     return {provider: {"type": "api", "key": key}}
 
 
@@ -1901,7 +1970,7 @@ def atomic_private_json(path: Path, payload: object) -> None:
 
 
 def install_opencode_auth(
-    env: dict[str, str], payload: dict[str, object]
+    env: dict[str, str], payload: dict[str, object], method: str
 ) -> tuple[dict[str, object], Path]:
     provider = next(iter(payload))
     destination = Path(env["XDG_DATA_HOME"]) / "opencode/auth.json"
@@ -1911,7 +1980,7 @@ def install_opencode_auth(
         raise RuntimeError("isolated OpenCode credential permissions are invalid")
     return (
         {
-            "method": "isolated-auth-file",
+            "method": method,
             "provider": provider,
             "verified": True,
             "cleanup_verified": False,
@@ -2033,6 +2102,7 @@ def run_episode(
     model: str | None,
     provider: str | None,
     opencode_auth: dict[str, object] | None,
+    opencode_auth_method: str,
     codex_sandbox: str,
     real_pairmux: str,
     pairmux_version: str,
@@ -2140,6 +2210,7 @@ def run_episode(
             "PAIRMUX_STATE_NAMESPACE": str(state_namespace),
         }
     )
+    control_timeout = 60.0
 
     setup_result = run_process(
         [str(control_scenario / "setup.sh")],
@@ -2147,7 +2218,7 @@ def run_episode(
         env=setup_env,
         stdout_path=evidence_dir / "setup.stdout.log",
         stderr_path=evidence_dir / "setup.stderr.log",
-        timeout=min(timeout, 60.0),
+        timeout=control_timeout,
     )
     agent_result: ProcessResult | None = None
     check_result: ProcessResult | None = None
@@ -2188,7 +2259,7 @@ def run_episode(
 
             if opencode_auth is not None:
                 credential_injection, credential_path = install_opencode_auth(
-                    clean_env, opencode_auth
+                    clean_env, opencode_auth, opencode_auth_method
                 )
 
             project_isolation = prepare_agent_project_isolation(
@@ -2290,7 +2361,7 @@ def run_episode(
                 env=check_env,
                 stdout_path=evidence_dir / "check.stdout.log",
                 stderr_path=evidence_dir / "check.stderr.log",
-                timeout=min(timeout, 60.0),
+                timeout=control_timeout,
             )
         else:
             transcript_path.touch()
@@ -2669,12 +2740,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--model", type=non_empty_text, help="agent model identifier (agent default when omitted)"
     )
     parser.add_argument(
-        "--provider", type=non_empty_text, help="actual model provider; required for acceptance evidence"
+        "--provider",
+        type=non_empty_text,
+        help="explicit OpenCode provider ID; required for acceptance evidence",
     )
-    parser.add_argument(
+    auth_source = parser.add_mutually_exclusive_group()
+    auth_source.add_argument(
         "--opencode-auth-file",
         type=Path,
         help="explicit 0600 OpenCode auth.json; only the selected API provider is isolated",
+    )
+    auth_source.add_argument(
+        "--opencode-auth-env",
+        type=non_empty_text,
+        help="supported host token variable copied into an isolated OpenCode auth.json",
     )
     parser.add_argument(
         "--acceptance-profile",
@@ -2719,15 +2798,40 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     model_provider = inferred_provider(args.model)
+    opencode_auth_method = (
+        "isolated-auth-file"
+        if args.opencode_auth_file is not None
+        else "isolated-auth-file-from-environment"
+        if args.opencode_auth_env is not None
+        else "none"
+    )
     if args.provider and model_provider and args.provider != model_provider:
         parser.error(
             f"--provider {args.provider!r} does not match model prefix {model_provider!r}"
         )
-    if args.opencode_auth_file is not None:
+    if args.opencode_auth_file is not None or args.opencode_auth_env is not None:
         if args.agent != "opencode":
-            parser.error("--opencode-auth-file is only valid with --agent opencode")
+            parser.error("OpenCode auth injection is only valid with --agent opencode")
         if model_provider is None:
-            parser.error("--opencode-auth-file requires --model with a provider prefix")
+            parser.error("OpenCode auth injection requires --model with a provider prefix")
+    if args.opencode_auth_env is not None:
+        assert model_provider is not None
+        expected_name = OPENCODE_AUTH_ENV_BY_PROVIDER.get(model_provider)
+        if expected_name is None:
+            parser.error("--opencode-auth-env is unsupported for the selected model provider")
+        if args.opencode_auth_env != expected_name:
+            parser.error(
+                f"--opencode-auth-env for provider {model_provider!r} must be {expected_name}"
+            )
+    if (
+        args.agent == "opencode"
+        and model_provider == "huggingface"
+        and opencode_auth_method == "none"
+    ):
+        parser.error(
+            "Hugging Face OpenCode models require --opencode-auth-env HF_TOKEN "
+            "or --opencode-auth-file"
+        )
     try:
         scenarios = parse_scenarios(args.scenario, discover_scenarios())
     except ValueError as error:
@@ -2744,9 +2848,7 @@ def main(argv: list[str] | None = None) -> int:
                     "scenario": scenario,
                     "repeat": repetition,
                     "cwd": str(SCENARIOS_DIR / scenario),
-                    "credential_injection": (
-                        "isolated-auth-file" if args.opencode_auth_file else "none"
-                    ),
+                    "credential_injection": opencode_auth_method,
                     "argv": build_agent_argv(
                         args.agent,
                         agent_executable,
@@ -2779,14 +2881,25 @@ def main(argv: list[str] | None = None) -> int:
             opencode_auth = load_opencode_api_auth(args.opencode_auth_file, model_provider)
         except ValueError as error:
             parser.error(str(error))
+    elif args.opencode_auth_env is not None:
+        assert model_provider is not None
+        try:
+            opencode_auth = load_opencode_api_auth_env(
+                os.environ, args.opencode_auth_env, model_provider
+            )
+        except ValueError as error:
+            parser.error(str(error))
 
     run_started_at = utc_now()
     run_started = time.monotonic()
     git_start = git_provenance()
     run_id, run_root = make_run_root(args.output_dir)
     agent_executable = str(Path(shutil.which(args.agent) or args.agent).resolve())
-    agent_version = probe_version(agent_executable)
-    pairmux_version = probe_version(real_pairmux)
+    with tempfile.TemporaryDirectory(prefix="pairmux-eval-version-") as probe_home_value:
+        probe_home = Path(probe_home_value)
+        probe_env = isolated_version_probe_env(os.environ, probe_home)
+        agent_version = probe_version(agent_executable, env=probe_env, cwd=probe_home)
+        pairmux_version = probe_version(real_pairmux, env=probe_env, cwd=probe_home)
     pairmux_sha256 = sha256_file(Path(real_pairmux))
     skill_tree_sha256 = sha256_tree(SKILL_SOURCE)
     skill_md_sha256 = sha256_file(SKILL_SOURCE / "SKILL.md")
@@ -2809,6 +2922,7 @@ def main(argv: list[str] | None = None) -> int:
                         model=args.model,
                         provider=args.provider,
                         opencode_auth=opencode_auth,
+                        opencode_auth_method=opencode_auth_method,
                         codex_sandbox=args.codex_sandbox,
                         real_pairmux=real_pairmux,
                         pairmux_version=pairmux_version,
@@ -2844,7 +2958,7 @@ def main(argv: list[str] | None = None) -> int:
                         "failure_class": normalized_failure,
                         "agent_observed_failure_class": None,
                         "credential_injection": {
-                            "method": "isolated-auth-file" if opencode_auth else "none",
+                            "method": opencode_auth_method,
                             "provider": model_provider if opencode_auth else None,
                             "verified": False,
                             "cleanup_verified": False,

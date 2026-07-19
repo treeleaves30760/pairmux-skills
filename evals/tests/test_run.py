@@ -39,11 +39,13 @@ class RunnerTests(unittest.TestCase):
             shutil.copy2(MOCK_BIN, target)
             target.chmod(0o755)
         self.agent_log = self.root / "agent.jsonl"
+        self.version_log = self.root / "version.jsonl"
         self.env = os.environ.copy()
         self.env.update(
             {
                 "PATH": str(self.bin_dir) + os.pathsep + self.env.get("PATH", ""),
                 "PAIRMUX_MOCK_AGENT_LOG": str(self.agent_log),
+                "PAIRMUX_MOCK_VERSION_LOG": str(self.version_log),
             }
         )
 
@@ -368,6 +370,84 @@ class RunnerTests(unittest.TestCase):
                 self.assertTrue(all(call["started_at"] for call in calls))
                 self.assertTrue(all(call["finished_at"] for call in calls))
 
+    def test_version_probes_use_secret_free_ephemeral_environment(self) -> None:
+        secret = "version-probe-hf-secret-sentinel-8d31"
+        env = self.env.copy()
+        env.update(
+            {
+                "HF_TOKEN": secret,
+                "OPENAI_API_KEY": "version-openai-secret",
+                "ANTHROPIC_API_KEY": "version-anthropic-secret",
+                "OPENCODE_AUTH_CONTENT": "version-opencode-content-secret",
+                "OPENCODE_API_KEY": "version-opencode-key-secret",
+            }
+        )
+        completed = self.invoke(
+            "--agent",
+            "opencode",
+            "--scenario",
+            "S01",
+            "--timeout",
+            "5",
+            "--output-dir",
+            str(self.root / "version-probe-runs"),
+            env=env,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        run_root, result = self.result_for(completed)
+        records = [
+            json.loads(line)
+            for line in self.version_log.read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual({record["program"] for record in records}, {"opencode", "pairmux"})
+        self.assertTrue(all(record["credential_names_present"] == [] for record in records))
+        probe_homes = {Path(record["home"]) for record in records}
+        self.assertEqual(len(probe_homes), 1)
+        probe_home = next(iter(probe_homes))
+        self.assertTrue(
+            all(Path(record["cwd"]).resolve() == probe_home.resolve() for record in records)
+        )
+        self.assertFalse(probe_home.exists())
+        self.assertEqual(result["agent_version"], "opencode mock-1.0")
+        self.assertEqual(result["pairmux_version"], "pairmux mock-1.0")
+        persisted = b"\n".join(
+            path.read_bytes() for path in run_root.rglob("*") if path.is_file()
+        )
+        self.assertNotIn(secret.encode(), persisted)
+        self.assertNotIn(secret, completed.stdout)
+        self.assertNotIn(secret, completed.stderr)
+
+    def test_git_provenance_uses_secret_free_environment(self) -> None:
+        revision = subprocess.CompletedProcess(
+            ["git"], 0, stdout="a" * 40 + "\n", stderr=""
+        )
+        status = subprocess.CompletedProcess(["git"], 0, stdout="", stderr="")
+        poisoned = {
+            "PATH": self.env.get("PATH", ""),
+            "HF_TOKEN": "hf-secret",
+            "OPENAI_API_KEY": "openai-secret",
+            "ANTHROPIC_API_KEY": "anthropic-secret",
+            "OPENCODE_AUTH_CONTENT": "opencode-secret",
+        }
+        with (
+            mock.patch.dict(os.environ, poisoned, clear=True),
+            mock.patch.object(eval_run.subprocess, "run", side_effect=(revision, status)) as run,
+        ):
+            provenance = eval_run.git_provenance(self.root)
+        self.assertEqual(provenance, {"commit": "a" * 40, "dirty": False})
+        self.assertEqual(run.call_count, 2)
+        for call in run.call_args_list:
+            child_env = call.kwargs["env"]
+            self.assertEqual(child_env["PATH"], poisoned["PATH"])
+            self.assertEqual(child_env["GIT_CONFIG_GLOBAL"], os.devnull)
+            for name in (
+                "HF_TOKEN",
+                "OPENAI_API_KEY",
+                "ANTHROPIC_API_KEY",
+                "OPENCODE_AUTH_CONTENT",
+            ):
+                self.assertNotIn(name, child_env)
+
     def test_repeats_use_distinct_episode_socket_and_state(self) -> None:
         completed = self.invoke(
             "--agent",
@@ -403,7 +483,7 @@ class RunnerTests(unittest.TestCase):
             "--scenario",
             "S01",
             "--timeout",
-            "0.5",
+            "1",
             "--output-dir",
             str(self.root / "timeout-runs"),
             env=env,
@@ -526,6 +606,88 @@ class RunnerTests(unittest.TestCase):
                 self.assertEqual(summary["schedule"]["completed_episodes"], 1)
                 self.assertEqual(summary["schedule"]["skipped_episodes"], 1)
 
+    def test_huggingface_provider_failures_are_classified_and_stop_schedule(self) -> None:
+        expected = {
+            "huggingface_rate_limited": "provider_rate_limited",
+            "huggingface_auth_failed": "provider_auth_failed",
+            "huggingface_unavailable": "provider_unavailable",
+        }
+        for mode, failure_class in expected.items():
+            with self.subTest(mode=mode):
+                env = self.env.copy()
+                env["PAIRMUX_MOCK_MODE"] = mode
+                env["HF_TOKEN"] = "mock-hf-token"
+                completed = self.invoke(
+                    "--agent",
+                    "opencode",
+                    "--provider",
+                    "huggingface",
+                    "--model",
+                    "huggingface/deepseek-ai/DeepSeek-V4-Flash",
+                    "--opencode-auth-env",
+                    "HF_TOKEN",
+                    "--scenario",
+                    "S01-S02",
+                    "--timeout",
+                    "5",
+                    "--output-dir",
+                    str(self.root / f"{mode}-runs"),
+                    env=env,
+                )
+                self.assertEqual(completed.returncode, 1)
+                run_root, result = self.result_for(completed)
+                self.assertEqual(result["failure_class"], failure_class)
+                self.assertEqual(result["agent_observed_failure_class"], failure_class)
+                self.assertFalse(result["timed_out"])
+                self.assertEqual(
+                    result["credential_injection"]["method"],
+                    "isolated-auth-file-from-environment",
+                )
+                summary = json.loads(
+                    (run_root / "summary.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(summary["stop_reason"], failure_class)
+                self.assertEqual(summary["schedule"]["completed_episodes"], 1)
+                self.assertEqual(summary["schedule"]["skipped_episodes"], 1)
+
+    def test_huggingface_machine_log_variants_are_classified_narrowly(self) -> None:
+        prefix = (
+            'timestamp=2026-07-19T00:00:00Z level=ERROR message="stream error" '
+            'error.error="'
+        )
+        cases = {
+            "AI_APICallError: Too Many Requests": "provider_rate_limited",
+            (
+                "AI_RetryError: Failed after 3 attempts. Last error: "
+                "Too Many Requests statusCode: 429"
+            ): "provider_rate_limited",
+            "AI_APICallError: Unauthorized": "provider_auth_failed",
+            "AI_APICallError: Invalid username or password": "provider_auth_failed",
+            "AI_APICallError: Forbidden": "provider_auth_failed",
+            "AI_APICallError: Internal Server Error": "provider_unavailable",
+            "AI_APICallError: Service Unavailable": "provider_unavailable",
+            (
+                "AI_RetryError: Failed after 3 attempts. Last error: "
+                "Gateway Timeout statusCode: 504"
+            ): "provider_unavailable",
+        }
+        for error_text, failure_class in cases.items():
+            with self.subTest(error_text=error_text):
+                self.assertEqual(
+                    eval_run.opencode_provider_failure(prefix + error_text + '"'),
+                    failure_class,
+                )
+
+        for stderr in (
+            prefix + 'AI_APICallError: Bad Request statusCode: 400"',
+            prefix + 'AI_APICallError: Not Found statusCode: 404"',
+            prefix + 'ProviderModelNotFoundError: Model not found"',
+            'level=ERROR message="other error" error.error="AI_APICallError: Unauthorized"',
+            'message="stream error" error.error="AI_APICallError: Too Many Requests"',
+        ):
+            with self.subTest(stderr=stderr):
+                self.assertIsNone(eval_run.opencode_provider_failure(stderr))
+
     def test_opencode_silent_hang_remains_agent_timeout(self) -> None:
         env = self.env.copy()
         env["PAIRMUX_MOCK_MODE"] = "hang"
@@ -535,7 +697,7 @@ class RunnerTests(unittest.TestCase):
             "--scenario",
             "S01",
             "--timeout",
-            "0.5",
+            "1",
             "--output-dir",
             str(self.root / "opencode-timeout-runs"),
             env=env,
@@ -594,7 +756,7 @@ class RunnerTests(unittest.TestCase):
             "--scenario",
             "S01",
             "--timeout",
-            "0.5",
+            "2",
             "--output-dir",
             str(self.root / "proxy-timeout-runs"),
             env=env,
@@ -619,7 +781,7 @@ class RunnerTests(unittest.TestCase):
             "--scenario",
             "S05",
             "--timeout",
-            "1.5",
+            "3",
             "--output-dir",
             str(self.root / "handoff-runs"),
             env=env,
@@ -1430,7 +1592,7 @@ class RunnerTests(unittest.TestCase):
                     "--scenario",
                     "S01",
                     "--timeout",
-                    "0.5" if mode == "hang" else "5",
+                    "1" if mode == "hang" else "5",
                     "--output-dir",
                     str(self.root / f"auth-{mode}-runs"),
                     env=env,
@@ -1660,6 +1822,7 @@ class RunnerTests(unittest.TestCase):
         env["HOME"] = str(host_home)
         env["OPENCODE_AUTH_CONTENT"] = "host-content-poison"
         env["OPENCODE_API_KEY"] = "host-key-poison"
+        env["HF_TOKEN"] = "host-hf-poison"
         completed = self.invoke(
             "--agent",
             "opencode",
@@ -1677,7 +1840,133 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(invocation["opencode_auth_providers"], [])
         self.assertFalse(invocation["opencode_auth_content_present"])
         self.assertFalse(invocation["opencode_api_key_present"])
+        self.assertFalse(invocation["hf_token_present"])
         self.assertEqual(result["credential_injection"]["method"], "none")
+
+    def test_hf_token_is_not_part_of_any_base_isolated_environment(self) -> None:
+        source = {"PATH": self.env.get("PATH", ""), "HF_TOKEN": "must-not-pass-through"}
+        for agent in ("opencode", "claude", "codex"):
+            with self.subTest(agent=agent):
+                clean = eval_run.isolated_agent_env(
+                    source,
+                    agent=agent,
+                    isolated_home=self.root / f"isolated-{agent}",
+                )
+                self.assertNotIn("HF_TOKEN", clean)
+
+    def test_huggingface_token_is_isolated_without_runner_persistence(self) -> None:
+        secret = "hf-secret-sentinel-d7a4"
+        env = self.env.copy()
+        env["HF_TOKEN"] = secret
+        completed = self.invoke(
+            "--agent",
+            "opencode",
+            "--provider",
+            "huggingface",
+            "--model",
+            "huggingface/deepseek-ai/DeepSeek-V4-Flash",
+            "--opencode-auth-env",
+            "HF_TOKEN",
+            "--scenario",
+            "S01",
+            "--timeout",
+            "5",
+            "--output-dir",
+            str(self.root / "huggingface-token-runs"),
+            env=env,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        run_root, result = self.result_for(completed)
+        invocation = json.loads(self.agent_log.read_text(encoding="utf-8").splitlines()[0])
+        self.assertFalse(invocation["hf_token_present"])
+        self.assertEqual(invocation["opencode_auth_providers"], ["huggingface"])
+        self.assertEqual(invocation["opencode_auth_mode"], "0o600")
+        self.assertFalse(Path(invocation["opencode_auth_path"]).exists())
+        self.assertEqual(result["provider"], "huggingface")
+        self.assertTrue(result["provider_verified"])
+        self.assertEqual(
+            result["model"], "huggingface/deepseek-ai/DeepSeek-V4-Flash"
+        )
+        self.assertEqual(
+            result["credential_injection"],
+            {
+                "cleanup_verified": True,
+                "method": "isolated-auth-file-from-environment",
+                "provider": "huggingface",
+                "verified": True,
+            },
+        )
+        manifest = json.loads(
+            (run_root / result["paths"]["control_manifest"]).read_text(encoding="utf-8")
+        )
+        self.assertEqual(manifest["credential_injection"], result["credential_injection"])
+        summary = json.loads((run_root / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            summary["results"][0]["credential_injection"],
+            result["credential_injection"],
+        )
+        persisted = b"\n".join(
+            path.read_bytes() for path in run_root.rglob("*") if path.is_file()
+        )
+        self.assertNotIn(secret.encode(), persisted)
+        self.assertNotIn(secret, completed.stdout)
+        self.assertNotIn(secret, completed.stderr)
+
+    def test_huggingface_auth_file_is_minimized_and_isolated(self) -> None:
+        secret = "hf-file-secret-sentinel-1e83"
+        unrelated_secret = "unrelated-file-secret-sentinel-6c92"
+        auth_file = self.root / "huggingface-auth.json"
+        auth_file.write_text(
+            json.dumps(
+                {
+                    "huggingface": {"type": "api", "key": secret},
+                    "openai": {"type": "api", "key": unrelated_secret},
+                }
+            ),
+            encoding="utf-8",
+        )
+        auth_file.chmod(0o600)
+        completed = self.invoke(
+            "--agent",
+            "opencode",
+            "--provider",
+            "huggingface",
+            "--model",
+            "huggingface/deepseek-ai/DeepSeek-V4-Flash",
+            "--opencode-auth-file",
+            str(auth_file),
+            "--scenario",
+            "S01",
+            "--timeout",
+            "5",
+            "--output-dir",
+            str(self.root / "huggingface-auth-file-runs"),
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        run_root, result = self.result_for(completed)
+        invocation = json.loads(self.agent_log.read_text(encoding="utf-8").splitlines()[0])
+        self.assertEqual(invocation["opencode_auth_providers"], ["huggingface"])
+        self.assertEqual(invocation["opencode_auth_mode"], "0o600")
+        self.assertFalse(invocation["hf_token_present"])
+        self.assertFalse(Path(invocation["opencode_auth_path"]).exists())
+        self.assertEqual(result["provider"], "huggingface")
+        self.assertEqual(
+            result["model"], "huggingface/deepseek-ai/DeepSeek-V4-Flash"
+        )
+        self.assertEqual(result["credential_injection"]["method"], "isolated-auth-file")
+        self.assertEqual(result["credential_injection"]["provider"], "huggingface")
+        self.assertTrue(result["credential_injection"]["cleanup_verified"])
+        self.assertEqual(
+            json.loads(auth_file.read_text(encoding="utf-8"))["huggingface"]["key"],
+            secret,
+        )
+        persisted = b"\n".join(
+            path.read_bytes() for path in run_root.rglob("*") if path.is_file()
+        )
+        for value in (secret, unrelated_secret, str(auth_file)):
+            self.assertNotIn(value.encode(), persisted)
+            self.assertNotIn(value, completed.stdout)
+            self.assertNotIn(value, completed.stderr)
 
     def test_opencode_auth_cli_and_source_validation_fail_closed(self) -> None:
         valid = self.root / "valid-auth.json"
@@ -1690,6 +1979,40 @@ class RunnerTests(unittest.TestCase):
         semantic_cases = (
             ("--agent", "claude", "--model", "anthropic/mock", "--opencode-auth-file", str(valid)),
             ("--agent", "opencode", "--opencode-auth-file", str(valid)),
+            ("--agent", "claude", "--model", "anthropic/mock", "--opencode-auth-env", "HF_TOKEN"),
+            ("--agent", "opencode", "--opencode-auth-env", "HF_TOKEN"),
+            (
+                "--agent",
+                "opencode",
+                "--model",
+                "huggingface/deepseek-ai/DeepSeek-V4-Flash",
+            ),
+            (
+                "--agent",
+                "opencode",
+                "--model",
+                "opencode/big-pickle",
+                "--opencode-auth-env",
+                "HF_TOKEN",
+            ),
+            (
+                "--agent",
+                "opencode",
+                "--model",
+                "huggingface/deepseek-ai/DeepSeek-V4-Flash",
+                "--opencode-auth-env",
+                "OPENAI_API_KEY",
+            ),
+            (
+                "--agent",
+                "opencode",
+                "--model",
+                "huggingface/deepseek-ai/DeepSeek-V4-Flash",
+                "--opencode-auth-file",
+                str(valid),
+                "--opencode-auth-env",
+                "HF_TOKEN",
+            ),
         )
         for arguments in semantic_cases:
             with self.subTest(arguments=arguments):
@@ -1763,6 +2086,34 @@ class RunnerTests(unittest.TestCase):
                 self.assertNotIn("wrong-secret", completed.stderr)
                 self.assertNotIn("oauth-secret", completed.stderr)
 
+        for index, value in enumerate((None, "", " ", " padded-secret ")):
+            with self.subTest(hf_token=value):
+                invalid_env = self.env.copy()
+                if value is None:
+                    invalid_env.pop("HF_TOKEN", None)
+                else:
+                    invalid_env["HF_TOKEN"] = value
+                output_dir = self.root / f"invalid-hf-token-{index}"
+                completed = self.invoke(
+                    "--agent",
+                    "opencode",
+                    "--provider",
+                    "huggingface",
+                    "--model",
+                    "huggingface/deepseek-ai/DeepSeek-V4-Flash",
+                    "--opencode-auth-env",
+                    "HF_TOKEN",
+                    "--scenario",
+                    "S01",
+                    "--output-dir",
+                    str(output_dir),
+                    env=invalid_env,
+                )
+                self.assertEqual(completed.returncode, 2)
+                self.assertIn("missing, empty, or padded", completed.stderr)
+                self.assertNotIn("padded-secret", completed.stderr)
+                self.assertFalse(output_dir.exists())
+
     def test_dry_run_records_auth_intent_without_reading_source(self) -> None:
         missing = self.root / "not-read-during-dry-run.json"
         completed = self.invoke(
@@ -1781,6 +2132,28 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         plan = json.loads(completed.stdout)
         self.assertEqual(plan["credential_injection"], "isolated-auth-file")
+
+        missing_env = self.env.copy()
+        missing_env.pop("HF_TOKEN", None)
+        completed = self.invoke(
+            "--agent",
+            "opencode",
+            "--provider",
+            "huggingface",
+            "--model",
+            "huggingface/deepseek-ai/DeepSeek-V4-Flash",
+            "--opencode-auth-env",
+            "HF_TOKEN",
+            "--scenario",
+            "S01",
+            "--dry-run",
+            env=missing_env,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        plan = json.loads(completed.stdout)
+        self.assertEqual(
+            plan["credential_injection"], "isolated-auth-file-from-environment"
+        )
 
     def test_acceptance_requires_stable_git_provenance(self) -> None:
         results = [

@@ -21,7 +21,8 @@ claim can be reproduced and audited.
 - skill: `<tree sha256>`, `SKILL.md <sha256>`
 - sandbox/config: `<Codex sandbox or agent-specific notes>`; project isolation
   `<result.json agent_project_isolation.method>`
-- credential injection: `<none or isolated-auth-file>`; provider `<id>`; never record source/secret
+- credential injection: `<none, isolated-auth-file, or isolated-auth-file-from-environment>`;
+  provider `<id>`; never record source/secret
 - provenance: git `<commit>` to `<end_commit>` (`dirty=false`, `end_dirty=false`, `stable=true`)
 - fixtures: `summary.json.fixture_sha256` (per-scenario file/hash map)
 - schedule: `<completed>/<planned>` episodes; `<skipped>` skipped; stop reason `<reason or null>`
@@ -120,7 +121,8 @@ Run with the harness in [README.md](README.md), record here:
 
 - [ ] Claude Code (`claude -p`) passes S01–S09 headless with the runner's isolated, hash-verified skill copy.
 - [ ] Codex (`codex exec`) passes at least S01–S06 and S08; note harness differences.
-- [ ] OpenCode Big Pickle repeatedly passes S01–S10 with `--pure --auto`; record pass rate and steps.
+- [ ] OpenCode `huggingface/deepseek-ai/DeepSeek-V4-Flash` repeatedly passes S01–S10 with
+  `--pure --auto`; record pass rate and steps.
 
-Big Pickle acceptance is still pending. A one-off S01 smoke/canary, even if successful, does not
-establish the required repeated S01–S10 pass rate or step-count baseline.
+DeepSeek V4 Flash acceptance is still pending. A one-off S01 smoke/canary, even if successful, does
+not establish the required repeated S01–S10 pass rate or step-count baseline.

@@ -24,8 +24,32 @@ def append_json(path_value: str | None, payload: dict[str, object]) -> None:
         stream.write("\n")
 
 
+def record_version_probe(program: str) -> None:
+    credential_names = (
+        "HF_TOKEN",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "OPENCODE_AUTH_CONTENT",
+        "OPENCODE_API_KEY",
+    )
+    append_json(
+        os.environ.get("PAIRMUX_MOCK_VERSION_LOG"),
+        {
+            "program": program,
+            "home": os.environ.get("HOME"),
+            "cwd": str(Path.cwd()),
+            "credential_names_present": [
+                name for name in credential_names if name in os.environ
+            ],
+        },
+    )
+    if os.environ.get("HF_TOKEN"):
+        print(os.environ["HF_TOKEN"])
+
+
 def run_pairmux(args: list[str]) -> int:
     if args == ["--version"]:
+        record_version_probe("pairmux")
         print("pairmux mock-1.0")
         return 0
     if args and args[0] == "mock-fail":
@@ -140,6 +164,7 @@ def emit_transcript(program: str) -> None:
 
 def run_agent(program: str, args: list[str]) -> int:
     if args == ["--version"]:
+        record_version_probe(program)
         print(f"{program} mock-1.0")
         return 0
     task_arguments = [value for value in args if "\n" in value and "pairmux" in value.lower()]
@@ -180,6 +205,7 @@ def run_agent(program: str, args: list[str]) -> int:
             "opencode_auth_mode": opencode_auth_mode,
             "opencode_auth_content_present": "OPENCODE_AUTH_CONTENT" in os.environ,
             "opencode_api_key_present": "OPENCODE_API_KEY" in os.environ,
+            "hf_token_present": "HF_TOKEN" in os.environ,
         },
     )
     if len(task_arguments) != 1:
@@ -217,6 +243,9 @@ def run_agent(program: str, args: list[str]) -> int:
         "provider_unavailable": (
             "AI_RetryError: Failed after 3 attempts. Last error: Service Unavailable"
         ),
+        "huggingface_rate_limited": "AI_APICallError: Too Many Requests",
+        "huggingface_auth_failed": "AI_APICallError: Unauthorized",
+        "huggingface_unavailable": "AI_APICallError: Internal Server Error",
     }
     if mode in provider_failures:
         sys.stderr.write(

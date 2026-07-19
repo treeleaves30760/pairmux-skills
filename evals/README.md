@@ -75,8 +75,9 @@ python3 evals/run.py \
 
 `--scenario` accepts `S01`, `1`, comma-separated values, or an ascending range such as `2-5`; it is
 repeatable. Omitting it selects every discovered scenario. `--dry-run` prints one JSON plan per
-episode and performs no setup, agent, check, or filesystem write. `--provider` records the actual
-provider; a P4 acceptance result is ineligible when provider/model are implicit or inconsistent, the
+episode and performs no setup, agent, check, or filesystem write. `--provider` records the explicit
+OpenCode provider ID and must match the model prefix; it does not claim which backend a router such
+as Hugging Face selected. A P4 acceptance result is ineligible when provider/model are implicit or inconsistent, the
 checkout is dirty or changes commit during the run, required scenarios/repetitions are missing, or
 the pass-rate threshold is not met. When
 `--acceptance-profile p4` is requested, an ineligible summary also makes the runner exit nonzero.
@@ -110,6 +111,25 @@ native transcript and log artifacts preserve what that agent emits, so use a res
 workspace/key because an agent shell can read and print any credential available to its own process.
 Credential unlink and control-root removal are verified after every outcome; cleanup failure fails
 the episode and stops the remaining schedule.
+
+For a Hugging Face-backed OpenCode model, copy the existing token into the same isolated auth-file
+path without exposing the host environment variable to version probes, the agent, setup, checker, or
+broker:
+
+```bash
+python3 evals/run.py \
+  --agent opencode \
+  --provider huggingface \
+  --model huggingface/deepseek-ai/DeepSeek-V4-Flash \
+  --opencode-auth-env HF_TOKEN \
+  --scenario S01
+```
+
+`--opencode-auth-env` is provider-bound (`HF_TOKEN` is accepted only for `huggingface`) and mutually
+exclusive with `--opencode-auth-file`. Its value is never placed in generated agent argv, result,
+summary, or control metadata; the runner records `isolated-auth-file-from-environment` and applies
+the same `0600` installation and verified cleanup. The cooperative-agent boundary still applies to
+the isolated auth file and native transcript/log output.
 
 The adapters deliberately use stable, non-interactive output modes:
 
@@ -264,5 +284,6 @@ S01–S10. Log benchmark runs in
 
 - Claude Code passes **S01–S09** headless with the runner-installed canonical skill.
 - Codex passes at least **S01–S06 and S08** (harness differences noted in `RESULTS.md`).
-- OpenCode Big Pickle is the cross-agent baseline: run S01–S10 repeatedly with `--pure --auto`, and
-  record both pass rate and step count rather than treating one successful episode as stability.
+- OpenCode with `huggingface/deepseek-ai/DeepSeek-V4-Flash` is the selected cross-agent baseline:
+  run S01–S10 repeatedly with `--pure --auto`, and record both pass rate and step count rather than
+  treating one successful episode as stability.
