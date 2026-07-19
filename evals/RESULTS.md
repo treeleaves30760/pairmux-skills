@@ -107,12 +107,57 @@ their artifacts remain under `evals/runs/`.
 | `20260719T004757.211669Z-84952-3ce6dafc` | `d2fe3aa` | 27/30 | S10 0/3: exact-token newline mismatch; r1 also exposed project-root/cwd-policy handling |
 | `20260719T012459.473483Z-13610-1b53341f` | `b425856` | 28/30 | S08 2/3; S09 2/3: equivalent journal evidence and recovery guidance |
 | `20260719T015615.849508Z-44088-8be8218f` | `1446a73` | 27/30 | S01 2/3; S08 1/3: provider early stop and equivalent server journal readback |
+| `20260719T061906.478016Z-19329-7168026d` | `e02c91a` | 29/30 | S05 2/3: evaluator rejected a live 600s handoff retry after OpenCode's 120s client disconnect |
+| `20260719T070137.908603Z-49635-46b70d75` | `732b52f` | 29/30 | S05 2/3: exact 300s retry had trailing global `--json`; shared decoder/socket validation did not yet mirror pairmux global parsing |
+
+---
+
+## Accepted P4 runs
+
+### 2026-07-19 — OpenCode 1.18.3 / DeepSeek V4 Flash — macOS 26.5.1 arm64
+
+- runner: `python3 evals/run.py --agent opencode --provider huggingface --model huggingface/deepseek-ai/DeepSeek-V4-Flash --opencode-auth-env HF_TOKEN --acceptance-profile p4 --scenario S01-S10 --repeat 3 --timeout 180 --pairmux-bin ../pairmux/bin/pairmux --output-dir evals/runs`
+- requested provider/model: `huggingface` / `huggingface/deepseek-ai/DeepSeek-V4-Flash`
+- run id: `20260719T073333.055301Z-76364-d8febe70`
+- artifacts: `evals/runs/20260719T073333.055301Z-76364-d8febe70`
+- machine: Darwin 25.5.0 arm64; macOS 26.5.1
+- tmux: 3.7b; pairmux: 0.1.0-dev, `../pairmux/bin/pairmux`,
+  `0288e5a85890ba92587c8b757116ee521a3174a6f0fe4b7d56eb1561c48f7919`
+- skill: tree `9a3b3c9521e14ddec0d7d89fbcef32035ac9b9b339ded12a595fae99ee3c3c4b`,
+  `SKILL.md 2d132d1ca2c02820fbf4d5bd825b96075bcddabc65318904c8f88e7eb8d384f7`
+- sandbox/config: OpenCode `--pure --auto`; project isolation `nested-committed-git-root`
+- credential injection: `isolated-auth-file-from-environment`; provider `huggingface`; 30/30
+  installations verified and 30/30 cleanups verified; no source name or secret persisted in the
+  generated run artifacts
+- provenance: git `2f0e6a48ae8fc5645236417a349d12befa60854a` to the same commit
+  (`dirty=false`, `end_dirty=false`, `stable=true`)
+- fixtures: all S01-S10 file hashes recorded in `summary.json.fixture_sha256`
+- schedule: 30/30 episodes; 0 skipped; no stop reason
+- acceptance: profile `p4`; minimum repetitions 3; threshold 1.0; eligible `true`; no reasons
+- audit: 0 trace errors, 0 provider failures, 0 control-cleanup failures, and no remaining
+  `pairmux-eval-control-*` directory
+
+| scenario | passed / episodes | pass rate | steps | policy rejections | wall time | notes |
+|----------|-------------------|-----------|-------|-------------------|-----------|-------|
+| S01 | 3/3 | 100% | 6 | 0 | 45.394s | instant command |
+| S02 | 3/3 | 100% | 7 | 0 | 138.463s | slow command completion |
+| S03 | 3/3 | 100% | 9 | 0 | 81.234s | truncated-output log search |
+| S04 | 3/3 | 100% | 15 | 0 | 96.688s | interactive confirmation |
+| S05 | 3/3 | 100% | 10 | 0 | 548.795s | `expected_human_handoff`; no secret submitted |
+| S06 | 3/3 | 100% | 17 | 0 | 97.658s | REPL interaction |
+| S07 | 3/3 | 100% | 12 | 0 | 67.474s | pager exit |
+| S08 | 3/3 | 100% | 15 | 0 | 134.786s | long-lived server and client |
+| S09 | 3/3 | 100% | 12 | 0 | 78.775s | in-place interrupt and recovery |
+| S10 | 3/3 | 100% | 4 | 0 | 56.973s | note relay |
+
+overall: 30/30 episodes passed; 107 broker-executed pairmux steps; 0 policy rejections;
+1348.061s runner wall time
 
 ---
 
 ## Headless acceptance status (P4 exit criteria)
 
-These remain pending until a clean checkout run uses explicit `--provider`, `--model`, and
+An item is complete only when a clean checkout run uses explicit `--provider`, `--model`, and
 `--acceptance-profile p4`, and `summary.json.acceptance.eligible` is true. The profile requires a
 100% threshold, at least one repetition for each required Claude/Codex scenario, and at least three
 repetitions for each of S01-S10 for OpenCode. An ineligible P4 run exits nonzero even when every
@@ -122,8 +167,8 @@ Run with the harness in [README.md](README.md), record here:
 
 - [ ] Claude Code (`claude -p`) passes S01–S09 headless with the runner's isolated, hash-verified skill copy.
 - [ ] Codex (`codex exec`) passes at least S01–S06 and S08; note harness differences.
-- [ ] OpenCode `huggingface/deepseek-ai/DeepSeek-V4-Flash` repeatedly passes S01–S10 with
+- [x] OpenCode `huggingface/deepseek-ai/DeepSeek-V4-Flash` repeatedly passes S01–S10 with
   `--pure --auto`; record pass rate and steps.
 
-DeepSeek V4 Flash acceptance is still pending. A one-off S01 smoke/canary, even if successful, does
-not establish the required repeated S01–S10 pass rate or step-count baseline.
+DeepSeek V4 Flash acceptance is established by run
+`20260719T073333.055301Z-76364-d8febe70`; the earlier one-off S01 canary remains diagnostic only.
