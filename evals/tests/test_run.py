@@ -630,6 +630,8 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("pairmux send <name> --key C-c", skill)
         self.assertIn("pairmux wait <name> --idle 800", skill)
         self.assertIn("`kill` destroys the terminal", skill)
+        self.assertIn("Pattern waits observe future output only", skill)
+        self.assertIn("use `peek`/`log --grep`; never wait for a past line", skill)
 
     def test_sourcing_generated_env_preserves_broker_proxy(self) -> None:
         env = self.env.copy()
