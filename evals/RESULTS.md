@@ -1,11 +1,14 @@
 # Eval results
 
-Log every eval run here: the machine, date, agent/model version, and per-scenario pass/fail.
+Record accepted benchmark runs and a compact history of formal acceptance attempts here. Targeted
+canaries remain auditable in `evals/runs/`, but they are diagnostic evidence rather than acceptance
+claims.
 
 ## Run template
 
-Copy this block for a benchmark run. Values come from generated `summary.json`; keep the run id and
-artifact location so results are auditable.
+Copy this block for a benchmark run. Most values come from generated `summary.json`; record the
+runner command, machine, and tmux version alongside it. Keep the run id and artifact location so the
+claim can be reproduced and audited.
 
 ```markdown
 ### YYYY-MM-DD — <agent> <version> / <model> — <machine>
@@ -16,33 +19,42 @@ artifact location so results are auditable.
 - artifacts: `<path to run directory>`
 - tmux: `<version>`; pairmux: `<version>`, `<resolved path>`, `<binary sha256>`
 - skill: `<tree sha256>`, `SKILL.md <sha256>`
-- sandbox/config: `<Codex sandbox or agent-specific notes>`
-- provenance: git `<commit>` (`dirty=false`); fixture manifest `<summary.json fixture_sha256>`
+- sandbox/config: `<Codex sandbox or agent-specific notes>`; project isolation
+  `<result.json agent_project_isolation.method>`
+- provenance: git `<commit>` to `<end_commit>` (`dirty=false`, `end_dirty=false`, `stable=true`)
+- fixtures: `summary.json.fixture_sha256` (per-scenario file/hash map)
 - acceptance: profile `<profile>`; minimum repetitions `<N>`; threshold `<rate>`; eligible `<bool>`
 
-| scenario | passed / episodes | pass rate | steps | wall time | notes |
-|----------|-------------------|-----------|-------|-----------|-------|
-| S01 | N/N | 100% | N | N.Ns | ... |
-| ... | ... | ... | ... | ... | ... |
+| scenario | passed / episodes | pass rate | steps | policy rejections | wall time | notes |
+|----------|-------------------|-----------|-------|-------------------|-----------|-------|
+| S01 | N/N | 100% | N | N | N.Ns | ... |
+| ... | ... | ... | ... | ... | ... | ... |
 
-overall: N/N episodes passed; N total pairmux steps; N.Ns runner wall time
+overall: N/N episodes passed; N broker-executed pairmux steps; N policy rejections; N.Ns runner wall
+time
 ```
 
 `pass` normally requires a successful agent exit, valid runner-owned exact-call proof, isolated
 terminal-state assertions, and `check.sh` exit 0. S05 additionally permits `expected_human_handoff`
 only for the same-terminal `wait --human --notify` still live at the runner deadline, without an
-explicit short timeout. Earlier signals and completed calls are not interruption proof. `steps` comes
-from the runner-owned execution-broker ledger, not transcript grep or agent JSON files.
+explicit short timeout. Earlier signals and completed calls are not interruption proof. `steps`
+counts broker-executed calls, not transcript grep or agent JSON files. A fully validated absolute
+working directory outside the episode work root is rejected without execution, recorded as a policy
+rejection, and may be nonfatal; malformed requests and every other broker protocol violation are
+fatal.
 
 ---
 
-### 2026-07-19 — author self-test (human acting as the agent per SKILL.md) — macOS (darwin 25.5.0)
+### 2026-07-19 — historical pre-hardening author self-test — macOS (darwin 25.5.0)
 
 tmux 3.7b, pairmux 0.1.0-dev. Method: for each scenario, ran `setup.sh`, then issued exactly the
 pairmux commands the skill dictates (no shortcuts), then ran `check.sh`. This validates that the
 checks are passable with correct behavior and that they fail on a virgin/incorrect environment. It is
 **not** a substitute for the headless Claude Code / Codex acceptance runs (see below) — it confirms the
 scenarios, checks, and skill guidance are internally consistent.
+
+This run predates the current broker, nested-project isolation, and hardened fixture/checker hashes.
+It remains historical context and cannot support current acceptance.
 
 | scenario | result | steps | notes |
 |----------|--------|-------|-------|
@@ -78,13 +90,27 @@ Notes:
 
 ---
 
-### Pending — headless acceptance runs (P4 exit criteria)
+## Pre-acceptance P4 attempts
+
+These full-profile runs are retained as transparent pre-acceptance history. Subsequent changes
+addressed evaluator or guidance gaps where applicable. Targeted follow-up runs are not listed here;
+their artifacts remain under `evals/runs/`.
+
+| run id | git commit | result | failure focus |
+|--------|------------|--------|---------------|
+| `20260719T004757.211669Z-84952-3ce6dafc` | `d2fe3aa` | 27/30 | S10 0/3: exact-token newline mismatch; r1 also exposed project-root/cwd-policy handling |
+| `20260719T012459.473483Z-13610-1b53341f` | `b425856` | 28/30 | S08 2/3; S09 2/3: equivalent journal evidence and recovery guidance |
+| `20260719T015615.849508Z-44088-8be8218f` | `1446a73` | 27/30 | S01 2/3; S08 1/3: provider early stop and equivalent server journal readback |
+
+---
+
+## Headless acceptance status (P4 exit criteria)
 
 These remain pending until a clean checkout run uses explicit `--provider`, `--model`, and
 `--acceptance-profile p4`, and `summary.json.acceptance.eligible` is true. The profile requires a
 100% threshold, at least one repetition for each required Claude/Codex scenario, and at least three
-repetitions across S01-S10 for OpenCode. An ineligible P4 run exits nonzero even when every selected
-episode passed, so partial runs cannot be mistaken for acceptance.
+repetitions for each of S01-S10 for OpenCode. An ineligible P4 run exits nonzero even when every
+selected episode passed, so partial runs cannot be mistaken for acceptance.
 
 Run with the harness in [README.md](README.md), record here:
 
