@@ -244,6 +244,21 @@ def run_agent(program: str, args: list[str]) -> int:
             client.sendall(struct.pack("!I", len(forged)) + forged)
             client.shutdown(socket.SHUT_WR)
             client.recv(4096)
+    if mode == "source_env":
+        env_file = Path(os.environ["PAIRMUX_STATE_DIR"]).parent / "env.sh"
+        subprocess.run(
+            [
+                "bash",
+                "-c",
+                '. "$1"; pairmux new --name mock; '
+                "pairmux run mock \"printf '%s\\n' PAIRMUX-S01-OK\"",
+                "source-env",
+                str(env_file),
+            ],
+            check=True,
+        )
+        emit_transcript(program)
+        return 0
 
     pairmux("new", "--name", "mock")
     pairmux("run", "mock", "printf '%s\\n' PAIRMUX-S01-OK")

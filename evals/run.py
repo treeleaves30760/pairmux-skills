@@ -146,12 +146,16 @@ def build_agent_argv(
     task: str,
     model: str | None,
     codex_sandbox: str,
+    working_directory: Path | None = None,
 ) -> list[str]:
     if agent == "opencode":
         argv = [executable, "--pure", "--auto"]
         if model:
             argv.extend(["--model", model])
-        argv.extend(["run", "--format", "json", task])
+        argv.extend(["run", "--format", "json"])
+        if working_directory is not None:
+            argv.extend(["--dir", str(working_directory.resolve())])
+        argv.append(task)
         return argv
     if agent == "claude":
         argv = [
@@ -200,6 +204,52 @@ def process_group_exists(process_group: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def parent_process_id(process_id: int) -> int | None:
+    """Read a live process's parent without trusting agent-provided evidence."""
+    if process_id <= 1:
+        return None
+    if sys.platform.startswith("linux"):
+        try:
+            stat = Path(f"/proc/{process_id}/stat").read_text(encoding="utf-8")
+            fields = stat[stat.rfind(")") + 2 :].split()
+            return int(fields[1])
+        except (FileNotFoundError, IndexError, OSError, ValueError):
+            return None
+
+    ps = "/bin/ps" if Path("/bin/ps").is_file() else shutil.which("ps")
+    if not ps:
+        return None
+    try:
+        completed = subprocess.run(
+            [ps, "-o", "ppid=", "-p", str(process_id)],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=1,
+        )
+        return int(completed.stdout.strip()) if completed.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+
+
+def process_descends_from(process_id: int, ancestor_id: int, max_depth: int = 128) -> bool:
+    """Return whether a live process is in the runner-observed agent ancestry."""
+    current = process_id
+    seen: set[int] = set()
+    for _depth in range(max_depth):
+        if current == ancestor_id:
+            return True
+        if current <= 1 or current in seen:
+            return False
+        seen.add(current)
+        parent = parent_process_id(current)
+        if parent is None:
+            return False
+        current = parent
+    return False
 
 
 def terminate_process_group(
@@ -1096,6 +1146,9 @@ class PairmuxBroker:
                     client_group = None
                     client_live = False
                 client_group_matches = client_group == process.pid
+                client_ancestry_matches = client_live and process_descends_from(
+                    int(execution.record["client_pid"]), process.pid
+                )
                 execution.record.update(
                     {
                         "runner_timeout_observed_at": observed_at,
@@ -1103,13 +1156,14 @@ class PairmuxBroker:
                         "runner_timeout_client_live": client_live
                         and execution.client_connected,
                         "runner_timeout_client_pgid_match": client_group_matches,
+                        "runner_timeout_client_ancestry_match": client_ancestry_matches,
                     }
                 )
                 if (
                     child_live
                     and client_live
                     and execution.client_connected
-                    and client_group_matches
+                    and client_ancestry_matches
                 ):
                     execution.record["runner_timeout_interrupted"] = True
                     inflight.append(call_id)
@@ -1186,7 +1240,7 @@ def call_was_interrupted(call: dict[str, object]) -> bool:
         call.get("runner_timeout_interrupted") is True
         and call.get("runner_timeout_pid_live") is True
         and call.get("runner_timeout_client_live") is True
-        and call.get("runner_timeout_client_pgid_match") is True
+        and call.get("runner_timeout_client_ancestry_match") is True
     )
 
 
@@ -1295,6 +1349,38 @@ def validate_scenario_calls(scenario: str, calls: list[dict[str, object]]) -> li
             and (not needle or any(needle in value for value in arguments))
         ]
 
+    def program_launches(needle: str) -> list[tuple[int, str, str]]:
+        launches: list[tuple[int, str, str]] = []
+        for index, call, name, arguments in decoded:
+            if call.get("exit_code") != 0:
+                continue
+            terminal: str | None = None
+            program = ""
+            if name == "new":
+                terminal = argument_value(arguments, "--name")
+                program = argument_value(arguments, "--cmd") or ""
+            elif name == "run":
+                values = positional_arguments(
+                    arguments,
+                    {
+                        "--timeout",
+                        "--idle",
+                        "--pattern",
+                        "--head",
+                        "--tail",
+                        "--text",
+                        "--key",
+                        "--cmd",
+                        "--grep",
+                        "--range",
+                    },
+                )
+                if len(values) >= 2:
+                    terminal, program = values[0], values[1]
+            if terminal and needle in program:
+                launches.append((index, terminal, program))
+        return launches
+
     if scenario == "S01":
         runs = [item for item in matching("run", "PAIRMUX-S01-OK") if item[1].get("exit_code") == 0]
         if not runs:
@@ -1343,12 +1429,11 @@ def validate_scenario_calls(scenario: str, calls: list[dict[str, object]]) -> li
         if s05_handoff_call(calls) is None:
             errors.append("missing runner-timeout-interrupted wait --human --notify on prompt terminal")
     elif scenario == "S06":
-        repls: list[tuple[int, str]] = []
-        for index, _call, arguments in matching("new"):
-            command_value = argument_value(arguments, "--cmd") or ""
-            name = argument_value(arguments, "--name")
-            if name and re.search(r"(^|[/ ])python3?($|[ ])", command_value):
-                repls.append((index, name))
+        repls = [
+            (index, terminal)
+            for index, terminal, program in program_launches("python")
+            if re.search(r"(^|[/\s])python3?(?:\s|$)", program)
+        ]
         proved = False
         for start_index, terminal in repls:
             expression = False
@@ -1377,21 +1462,22 @@ def validate_scenario_calls(scenario: str, calls: list[dict[str, object]]) -> li
         if not escaped:
             errors.append("no proxied q was sent to the report pager")
     elif scenario == "S08":
-        servers = matching("run", "server.sh")
-        clients = matching("run", "hit.sh")
+        servers = program_launches("server.sh")
+        clients = program_launches("hit.sh")
         proved = False
-        for server_index, _call, server_args in servers:
-            server_terminal = command_terminal(server_args)
-            for client_index, _client, client_args in clients:
-                client_terminal = command_terminal(client_args)
+        for server_index, server_terminal, _server_program in servers:
+            for client_index, client_terminal, _client_program in clients:
                 if not server_terminal or not client_terminal or server_terminal == client_terminal:
                     continue
                 for log_index, _log, log_args in matching("log"):
-                    grep_value = argument_value(log_args, "--grep") or ""
+                    grep_value = argument_value(log_args, "--grep")
                     if (
                         command_terminal(log_args) == server_terminal
                         and server_index < client_index < log_index
-                        and re.search(r"GET|HTTP", grep_value, re.IGNORECASE)
+                        and (
+                            grep_value is None
+                            or re.search(r"GET|HTTP", grep_value, re.IGNORECASE)
+                        )
                     ):
                         proved = True
         if not proved:
@@ -1556,7 +1642,14 @@ def run_episode(
     verify_hashes(control_hashes)
     task = task_path.read_text(encoding="utf-8")
     task_sha256 = hashlib.sha256(task.encode()).hexdigest()
-    agent_argv = build_agent_argv(agent, agent_executable, task, model, codex_sandbox)
+    agent_argv = build_agent_argv(
+        agent,
+        agent_executable,
+        task,
+        model,
+        codex_sandbox,
+        working_directory=scenario_dir,
+    )
 
     host_home = Path(os.environ.get("HOME", "~")).expanduser()
     clean_env = isolated_agent_env(os.environ.copy(), agent=agent, isolated_home=isolated_home)
@@ -1639,6 +1732,8 @@ def run_episode(
                 {
                     "PATH": str(proxy_dir) + os.pathsep + clean_env.get("PATH", ""),
                     "PAIRMUX_BIN": str(proxy_path),
+                    "PAIRMUX_EVAL_PROXY_DIR": str(proxy_dir),
+                    "PAIRMUX_EVAL_PROXY_BIN": str(proxy_path),
                     "PAIRMUX_SOCKET": socket_name,
                     "PAIRMUX_STATE_DIR": str(state_dir),
                     "TMUX_TMPDIR": tmux_tmpdir,
@@ -2101,7 +2196,12 @@ def main(argv: list[str] | None = None) -> int:
                     "repeat": repetition,
                     "cwd": str(SCENARIOS_DIR / scenario),
                     "argv": build_agent_argv(
-                        args.agent, agent_executable, task, args.model, args.codex_sandbox
+                        args.agent,
+                        agent_executable,
+                        task,
+                        args.model,
+                        args.codex_sandbox,
+                        working_directory=SCENARIOS_DIR / scenario,
                     ),
                 }
                 print(json.dumps(plan, ensure_ascii=True, separators=(",", ":"), sort_keys=True))

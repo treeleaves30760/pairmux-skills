@@ -305,6 +305,10 @@ class RunnerTests(unittest.TestCase):
                     self.assertIn("--pure", argv)
                     self.assertIn("--auto", argv)
                     self.assertEqual(argv[argv.index("--format") + 1], "json")
+                    scenario_dir = run_root / result["paths"]["episode"] / "work/S01"
+                    self.assertEqual(
+                        Path(argv[argv.index("--dir") + 1]).resolve(), scenario_dir.resolve()
+                    )
                     self.assertEqual(invocation["opencode_disable_project_config"], "1")
                 elif agent == "claude":
                     self.assertEqual(argv[argv.index("--output-format") + 1], "stream-json")
@@ -464,7 +468,7 @@ class RunnerTests(unittest.TestCase):
             "runner_timeout_interrupted": True,
             "runner_timeout_pid_live": True,
             "runner_timeout_client_live": True,
-            "runner_timeout_client_pgid_match": True,
+            "runner_timeout_client_ancestry_match": True,
         }
         self.assertTrue(eval_run.calls_have_human_wait([proof], require_interrupted=True))
 
@@ -481,21 +485,21 @@ class RunnerTests(unittest.TestCase):
                 "runner_timeout_interrupted": True,
                 "runner_timeout_pid_live": True,
                 "runner_timeout_client_live": True,
-                "runner_timeout_client_pgid_match": True,
+                "runner_timeout_client_ancestry_match": True,
             },
             {
                 "argv": ["wait", "secret", "--human"],
                 "runner_timeout_interrupted": True,
                 "runner_timeout_pid_live": True,
                 "runner_timeout_client_live": True,
-                "runner_timeout_client_pgid_match": True,
+                "runner_timeout_client_ancestry_match": True,
             },
             {
                 "argv": ["wait", "secret", "--human", "--notify", "--timeout", "30s"],
                 "runner_timeout_interrupted": True,
                 "runner_timeout_pid_live": True,
                 "runner_timeout_client_live": True,
-                "runner_timeout_client_pgid_match": True,
+                "runner_timeout_client_ancestry_match": True,
             },
         ]
         for call in counterexamples:
@@ -506,10 +510,61 @@ class RunnerTests(unittest.TestCase):
             "runner_timeout_interrupted": True,
             "runner_timeout_pid_live": True,
             "runner_timeout_client_live": True,
-            "runner_timeout_client_pgid_match": True,
+            "runner_timeout_client_ancestry_match": True,
         }
         failed_prompt = {"argv": ["run", "secret", "./secret.sh"], "exit_code": 7}
         self.assertIsNone(eval_run.s05_handoff_call([failed_prompt, interrupted_wait]))
+
+    def test_process_ancestry_uses_live_os_parentage(self) -> None:
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(10)"])
+        self.addCleanup(child.kill)
+        try:
+            self.assertTrue(eval_run.process_descends_from(child.pid, os.getpid()))
+            self.assertFalse(eval_run.process_descends_from(child.pid, 999_999_999))
+        finally:
+            child.kill()
+            child.wait(timeout=5)
+
+    def test_supported_repl_and_server_launch_forms_prove_calls(self) -> None:
+        repl_calls = [
+            {"argv": ["new", "--name", "py"], "exit_code": 0},
+            {"argv": ["run", "py", "python3", "--timeout", "10s"], "exit_code": 0},
+            {"argv": ["send", "py", "--text", "1234 * 5678", "--enter"], "exit_code": 0},
+            {"argv": ["send", "py", "--text", "exit()", "--enter"], "exit_code": 0},
+        ]
+        self.assertEqual(eval_run.validate_scenario_calls("S06", repl_calls), [])
+
+        server_calls = [
+            {"argv": ["new", "--name", "server", "--cmd", "./server.sh"], "exit_code": 0},
+            {"argv": ["new", "--name", "client", "--cmd", "./hit.sh"], "exit_code": 0},
+            {"argv": ["log", "server"], "exit_code": 0},
+        ]
+        self.assertEqual(eval_run.validate_scenario_calls("S08", server_calls), [])
+
+    def test_sourcing_generated_env_preserves_broker_proxy(self) -> None:
+        env = self.env.copy()
+        env["PAIRMUX_MOCK_MODE"] = "source_env"
+        completed = self.invoke(
+            "--agent",
+            "opencode",
+            "--scenario",
+            "S01",
+            "--timeout",
+            "5",
+            "--output-dir",
+            str(self.root / "source-env-runs"),
+            env=env,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        run_root, result = self.result_for(completed)
+        calls = [
+            json.loads(line)
+            for line in (run_root / result["paths"]["pairmux_calls"])
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        self.assertEqual([call["argv"][0] for call in calls], ["new", "run"])
+        self.assertEqual(result["trace_validation_errors"], [])
 
     def test_marker_shortcuts_fail_exact_call_validation(self) -> None:
         cases = {
