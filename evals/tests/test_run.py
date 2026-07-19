@@ -578,6 +578,53 @@ class RunnerTests(unittest.TestCase):
         ]
         self.assertEqual(eval_run.validate_scenario_calls("S08", server_calls), [])
 
+    def test_s08_accepts_status_filter_but_rejects_unrelated_log_filter(self) -> None:
+        calls = [
+            {"argv": ["new", "--name", "server"], "exit_code": 0},
+            {
+                "argv": ["run", "server", "./server.sh", "--timeout", "5s"],
+                "exit_code": 0,
+            },
+            {"argv": ["new", "--name", "client"], "exit_code": 0},
+            {
+                "argv": ["run", "client", "./hit.sh", "--timeout", "10s"],
+                "exit_code": 0,
+            },
+            {"argv": ["log", "server", "--grep", "200"], "exit_code": 0},
+        ]
+        self.assertEqual(eval_run.validate_scenario_calls("S08", calls), [])
+        calls[-1] = {"argv": ["log", "server", "--grep", "PORT"], "exit_code": 0}
+        self.assertTrue(eval_run.validate_scenario_calls("S08", calls))
+        calls[-1] = {"argv": ["log", "server", "--grep", "2000"], "exit_code": 0}
+        self.assertTrue(eval_run.validate_scenario_calls("S08", calls))
+
+    def test_s09_requires_in_place_interrupt_before_recovery(self) -> None:
+        recovered_in_place = [
+            {"argv": ["send", "worker", "--key", "C-c"], "exit_code": 0},
+            {
+                "argv": ["run", "worker", "echo WORKER-RECOVERED"],
+                "exit_code": 0,
+            },
+        ]
+        self.assertEqual(
+            eval_run.validate_scenario_calls("S09", recovered_in_place), []
+        )
+        replaced_terminal = [
+            {"argv": ["kill", "worker"], "exit_code": 0},
+            {"argv": ["new", "--name", "worker"], "exit_code": 0},
+            {
+                "argv": ["run", "worker", "echo WORKER-RECOVERED"],
+                "exit_code": 0,
+            },
+        ]
+        self.assertTrue(eval_run.validate_scenario_calls("S09", replaced_terminal))
+
+    def test_canonical_skill_promotes_in_place_hung_recovery(self) -> None:
+        skill = (eval_run.SKILL_SOURCE / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("pairmux send <name> --key C-c", skill)
+        self.assertIn("pairmux wait <name> --idle 800", skill)
+        self.assertIn("`kill` destroys the terminal", skill)
+
     def test_sourcing_generated_env_preserves_broker_proxy(self) -> None:
         env = self.env.copy()
         env["PAIRMUX_MOCK_MODE"] = "source_env"

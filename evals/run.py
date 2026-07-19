@@ -1643,7 +1643,11 @@ def validate_scenario_calls(scenario: str, calls: list[dict[str, object]]) -> li
                         and server_index < client_index < log_index
                         and (
                             grep_value is None
-                            or re.search(r"GET|HTTP", grep_value, re.IGNORECASE)
+                            or re.search(
+                                r"GET|HTTP|(?<!\d)200(?!\d)",
+                                grep_value,
+                                re.IGNORECASE,
+                            )
                         )
                     ):
                         proved = True
