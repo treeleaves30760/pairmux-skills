@@ -59,6 +59,8 @@ mkdir -p ~/.claude/skills && cp -R skills/pairmux ~/.claude/skills/pairmux
 
 See [`install-map.md`](install-map.md) for every verified agent directory and the universal
 `~/.agents/skills/` alias, plus the AGENTS.md fallback for agents with no native skills support.
+See [`RELEASING.md`](RELEASING.md) for the repository release checklist and the required sync into
+the pairmux CLI repository.
 
 ## Evals
 
