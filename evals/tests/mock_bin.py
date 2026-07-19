@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -149,6 +150,13 @@ def run_agent(program: str, args: list[str]) -> int:
         "codex": home / ".agents/skills/pairmux/SKILL.md",
     }
     skill_path = skill_paths[program]
+    opencode_auth_path = Path(os.environ["XDG_DATA_HOME"]) / "opencode/auth.json"
+    opencode_auth_providers: list[str] = []
+    opencode_auth_mode: str | None = None
+    if program == "opencode" and opencode_auth_path.is_file():
+        auth_payload = json.loads(opencode_auth_path.read_text(encoding="utf-8"))
+        opencode_auth_providers = sorted(auth_payload)
+        opencode_auth_mode = oct(stat.S_IMODE(opencode_auth_path.stat().st_mode))
     append_json(
         os.environ.get("PAIRMUX_MOCK_AGENT_LOG"),
         {
@@ -167,6 +175,11 @@ def run_agent(program: str, args: list[str]) -> int:
             "opencode_disable_project_config": os.environ.get(
                 "OPENCODE_DISABLE_PROJECT_CONFIG"
             ),
+            "opencode_auth_path": str(opencode_auth_path),
+            "opencode_auth_providers": opencode_auth_providers,
+            "opencode_auth_mode": opencode_auth_mode,
+            "opencode_auth_content_present": "OPENCODE_AUTH_CONTENT" in os.environ,
+            "opencode_api_key_present": "OPENCODE_API_KEY" in os.environ,
         },
     )
     if len(task_arguments) != 1:

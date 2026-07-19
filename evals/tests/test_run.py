@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 EVALS_DIR = Path(__file__).resolve().parents[1]
@@ -1335,6 +1336,451 @@ class RunnerTests(unittest.TestCase):
                     *arguments,
                 )
                 self.assertEqual(completed.returncode, 2)
+
+    def test_explicit_opencode_auth_is_minimized_isolated_and_removed(self) -> None:
+        opencode_secret = "zen-secret-sentinel-71d9"
+        unrelated_secret = "anthropic-secret-sentinel-2bc4"
+        env_secret = "environment-secret-sentinel-5a10"
+        auth_file = self.root / "host-auth.json"
+        source_payload = {
+            "opencode": {
+                "type": "api",
+                "key": opencode_secret,
+                "metadata": {"unneeded": "not-copied"},
+            },
+            "anthropic": {"type": "api", "key": unrelated_secret},
+        }
+        auth_file.write_text(json.dumps(source_payload), encoding="utf-8")
+        auth_file.chmod(0o600)
+        env = self.env.copy()
+        env["OPENCODE_AUTH_CONTENT"] = env_secret
+        env["OPENCODE_API_KEY"] = env_secret
+        completed = self.invoke(
+            "--agent",
+            "opencode",
+            "--provider",
+            "opencode",
+            "--model",
+            "opencode/big-pickle",
+            "--opencode-auth-file",
+            str(auth_file),
+            "--scenario",
+            "S01",
+            "--timeout",
+            "5",
+            "--output-dir",
+            str(self.root / "explicit-auth-runs"),
+            env=env,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        run_root, result = self.result_for(completed)
+        invocation = json.loads(self.agent_log.read_text(encoding="utf-8").splitlines()[0])
+        self.assertEqual(invocation["opencode_auth_providers"], ["opencode"])
+        self.assertEqual(invocation["opencode_auth_mode"], "0o600")
+        self.assertFalse(invocation["opencode_auth_content_present"])
+        self.assertFalse(invocation["opencode_api_key_present"])
+        self.assertFalse(Path(invocation["opencode_auth_path"]).exists())
+        self.assertEqual(
+            result["credential_injection"],
+            {
+                "cleanup_verified": True,
+                "method": "isolated-auth-file",
+                "provider": "opencode",
+                "verified": True,
+            },
+        )
+        manifest = json.loads(
+            (run_root / result["shell_path_guard"]["artifact"]).read_text(encoding="utf-8")
+        )
+        self.assertEqual(manifest["credential_injection"], result["credential_injection"])
+        self.assertEqual(json.loads(auth_file.read_text(encoding="utf-8")), source_payload)
+
+        persisted = b"\n".join(
+            path.read_bytes() for path in run_root.rglob("*") if path.is_file()
+        )
+        console = (completed.stdout + completed.stderr).encode()
+        for secret in (opencode_secret, unrelated_secret, env_secret):
+            self.assertNotIn(secret.encode(), persisted)
+            self.assertNotIn(secret.encode(), console)
+        self.assertNotIn(str(auth_file), persisted.decode(errors="replace"))
+
+    def test_explicit_opencode_auth_is_removed_after_agent_timeout_and_error(self) -> None:
+        secret = "cleanup-secret-sentinel-a930"
+        auth_file = self.root / "cleanup-auth.json"
+        auth_file.write_text(
+            json.dumps({"opencode": {"type": "api", "key": secret}}),
+            encoding="utf-8",
+        )
+        auth_file.chmod(0o600)
+        expected = {"hang": "agent_timeout", "fail": "agent_failed"}
+        for mode, failure_class in expected.items():
+            with self.subTest(mode=mode):
+                self.agent_log.unlink(missing_ok=True)
+                env = self.env.copy()
+                env["PAIRMUX_MOCK_MODE"] = mode
+                completed = self.invoke(
+                    "--agent",
+                    "opencode",
+                    "--provider",
+                    "opencode",
+                    "--model",
+                    "opencode/big-pickle",
+                    "--opencode-auth-file",
+                    str(auth_file),
+                    "--scenario",
+                    "S01",
+                    "--timeout",
+                    "0.5" if mode == "hang" else "5",
+                    "--output-dir",
+                    str(self.root / f"auth-{mode}-runs"),
+                    env=env,
+                )
+                self.assertEqual(completed.returncode, 1)
+                run_root, result = self.result_for(completed)
+                self.assertEqual(result["failure_class"], failure_class)
+                self.assertTrue(result["credential_injection"]["cleanup_verified"])
+                self.assertIsNone(result["control_cleanup_failure_class"])
+                invocation = json.loads(
+                    self.agent_log.read_text(encoding="utf-8").splitlines()[0]
+                )
+                self.assertFalse(Path(invocation["opencode_auth_path"]).exists())
+                persisted = b"\n".join(
+                    path.read_bytes() for path in run_root.rglob("*") if path.is_file()
+                )
+                self.assertNotIn(secret.encode(), persisted)
+
+    def test_control_cleanup_failures_are_normalized_and_fatal(self) -> None:
+        root = self.root / "credential-cleanup-root"
+        credential = root / "home/.local/share/opencode/auth.json"
+        credential.parent.mkdir(parents=True)
+        credential.write_text("secret", encoding="utf-8")
+        with mock.patch.object(Path, "unlink", side_effect=PermissionError("denied")):
+            failure = eval_run.cleanup_control_root(root, credential)
+        self.assertEqual(failure, "credential_cleanup_failed")
+        self.assertFalse(root.exists())
+
+        residual = self.root / "control-cleanup-root"
+        residual.mkdir()
+        with mock.patch.object(eval_run.shutil, "rmtree", return_value=None):
+            failure = eval_run.cleanup_control_root(residual, None)
+        self.assertEqual(failure, "control_cleanup_failed")
+        self.assertTrue(residual.exists())
+        shutil.rmtree(residual)
+        self.assertIn("credential_cleanup_failed", eval_run.RUN_FATAL_FAILURE_CLASSES)
+        self.assertIn("control_cleanup_failed", eval_run.RUN_FATAL_FAILURE_CLASSES)
+
+    def test_runner_exception_always_cleans_auth_and_cleanup_failure_stops_schedule(self) -> None:
+        secret = "runner-cleanup-secret-sentinel-0b42"
+        auth_file = self.root / "runner-cleanup-auth.json"
+        auth_file.write_text(
+            json.dumps({"opencode": {"type": "api", "key": secret}}),
+            encoding="utf-8",
+        )
+        auth_file.chmod(0o600)
+        base_arguments = [
+            "--agent",
+            "opencode",
+            "--provider",
+            "opencode",
+            "--model",
+            "opencode/big-pickle",
+            "--opencode-auth-file",
+            str(auth_file),
+            "--scenario",
+            "S01",
+            "--timeout",
+            "5",
+            "--pairmux-bin",
+            str(self.bin_dir / "pairmux"),
+        ]
+
+        first_output = self.root / "runner-exception-runs"
+        with (
+            mock.patch.dict(os.environ, self.env, clear=True),
+            mock.patch.object(
+                eval_run,
+                "cleanup_tmux",
+                side_effect=RuntimeError("simulated runner cleanup failure"),
+            ),
+            mock.patch("builtins.print"),
+        ):
+            returncode = eval_run.main(
+                [*base_arguments, "--repeat", "1", "--output-dir", str(first_output)]
+            )
+        self.assertEqual(returncode, 1)
+        first_root = next(first_output.iterdir())
+        first_result = json.loads(
+            (first_root / "results.jsonl").read_text(encoding="utf-8").splitlines()[0]
+        )
+        self.assertEqual(first_result["failure_class"], "runner_error")
+        first_invocation = json.loads(
+            self.agent_log.read_text(encoding="utf-8").splitlines()[0]
+        )
+        first_auth_path = Path(first_invocation["opencode_auth_path"])
+        self.assertFalse(first_auth_path.exists())
+        self.assertFalse(first_auth_path.parents[4].exists())
+        self.assertNotIn(
+            secret.encode(),
+            b"\n".join(path.read_bytes() for path in first_root.rglob("*") if path.is_file()),
+        )
+
+        self.agent_log.unlink()
+        original_cleanup = eval_run.cleanup_control_root
+
+        def clean_but_report_failure(control_root: Path, credential_path: Path | None) -> str:
+            self.assertIsNone(original_cleanup(control_root, credential_path))
+            return "credential_cleanup_failed"
+
+        second_output = self.root / "runner-and-cleanup-exception-runs"
+        with (
+            mock.patch.dict(os.environ, self.env, clear=True),
+            mock.patch.object(
+                eval_run,
+                "cleanup_tmux",
+                side_effect=RuntimeError("simulated runner cleanup failure"),
+            ),
+            mock.patch.object(
+                eval_run,
+                "cleanup_control_root",
+                side_effect=clean_but_report_failure,
+            ),
+            mock.patch("builtins.print"),
+        ):
+            returncode = eval_run.main(
+                [*base_arguments, "--repeat", "3", "--output-dir", str(second_output)]
+            )
+        self.assertEqual(returncode, 1)
+        second_root = next(second_output.iterdir())
+        results = [
+            json.loads(line)
+            for line in (second_root / "results.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["failure_class"], "credential_cleanup_failed")
+        self.assertEqual(
+            results[0]["control_cleanup_failure_class"], "credential_cleanup_failed"
+        )
+        second_invocation = json.loads(
+            self.agent_log.read_text(encoding="utf-8").splitlines()[0]
+        )
+        second_auth_path = Path(second_invocation["opencode_auth_path"])
+        self.assertFalse(second_auth_path.exists())
+        self.assertFalse(second_auth_path.parents[4].exists())
+        summary = json.loads((second_root / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            summary["schedule"],
+            {
+                "planned_episodes": 3,
+                "completed_episodes": 1,
+                "skipped_episodes": 2,
+                "stopped_early": True,
+                "stop_reason": "credential_cleanup_failed",
+            },
+        )
+
+    def test_cleanup_failure_stops_before_control_manifest_write(self) -> None:
+        auth_file = self.root / "manifest-cleanup-auth.json"
+        auth_file.write_text(
+            json.dumps({"opencode": {"type": "api", "key": "manifest-cleanup-secret"}}),
+            encoding="utf-8",
+        )
+        auth_file.chmod(0o600)
+        original_cleanup = eval_run.cleanup_control_root
+        original_atomic_json = eval_run.atomic_json
+        manifest_writes = 0
+
+        def clean_but_report_failure(control_root: Path, credential_path: Path | None) -> str:
+            self.assertIsNone(original_cleanup(control_root, credential_path))
+            return "credential_cleanup_failed"
+
+        def fail_manifest_write(path: Path, payload: object) -> None:
+            nonlocal manifest_writes
+            if path.name == "control-manifest.json":
+                manifest_writes += 1
+                raise RuntimeError("simulated manifest write failure")
+            original_atomic_json(path, payload)
+
+        output_dir = self.root / "manifest-cleanup-runs"
+        with (
+            mock.patch.dict(os.environ, self.env, clear=True),
+            mock.patch.object(
+                eval_run,
+                "cleanup_control_root",
+                side_effect=clean_but_report_failure,
+            ),
+            mock.patch.object(eval_run, "atomic_json", side_effect=fail_manifest_write),
+            mock.patch("builtins.print"),
+        ):
+            returncode = eval_run.main(
+                [
+                    "--agent",
+                    "opencode",
+                    "--provider",
+                    "opencode",
+                    "--model",
+                    "opencode/big-pickle",
+                    "--opencode-auth-file",
+                    str(auth_file),
+                    "--scenario",
+                    "S01",
+                    "--repeat",
+                    "3",
+                    "--timeout",
+                    "5",
+                    "--pairmux-bin",
+                    str(self.bin_dir / "pairmux"),
+                    "--output-dir",
+                    str(output_dir),
+                ]
+            )
+        self.assertEqual(returncode, 1)
+        self.assertEqual(manifest_writes, 0)
+        run_root = next(output_dir.iterdir())
+        results = [
+            json.loads(line)
+            for line in (run_root / "results.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["failure_class"], "credential_cleanup_failed")
+        summary = json.loads((run_root / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["stop_reason"], "credential_cleanup_failed")
+        self.assertEqual(summary["schedule"]["completed_episodes"], 1)
+        self.assertEqual(summary["schedule"]["skipped_episodes"], 2)
+
+    def test_host_opencode_auth_and_environment_are_not_inherited(self) -> None:
+        host_home = self.root / "poisoned-host-home"
+        host_auth = host_home / ".local/share/opencode/auth.json"
+        host_auth.parent.mkdir(parents=True)
+        host_auth.write_text(
+            json.dumps({"opencode": {"type": "api", "key": "host-poison-secret"}}),
+            encoding="utf-8",
+        )
+        host_auth.chmod(0o600)
+        env = self.env.copy()
+        env["HOME"] = str(host_home)
+        env["OPENCODE_AUTH_CONTENT"] = "host-content-poison"
+        env["OPENCODE_API_KEY"] = "host-key-poison"
+        completed = self.invoke(
+            "--agent",
+            "opencode",
+            "--scenario",
+            "S01",
+            "--timeout",
+            "5",
+            "--output-dir",
+            str(self.root / "no-auth-inheritance-runs"),
+            env=env,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        _run_root, result = self.result_for(completed)
+        invocation = json.loads(self.agent_log.read_text(encoding="utf-8").splitlines()[0])
+        self.assertEqual(invocation["opencode_auth_providers"], [])
+        self.assertFalse(invocation["opencode_auth_content_present"])
+        self.assertFalse(invocation["opencode_api_key_present"])
+        self.assertEqual(result["credential_injection"]["method"], "none")
+
+    def test_opencode_auth_cli_and_source_validation_fail_closed(self) -> None:
+        valid = self.root / "valid-auth.json"
+        valid.write_text(
+            json.dumps({"opencode": {"type": "api", "key": "valid-secret"}}),
+            encoding="utf-8",
+        )
+        valid.chmod(0o600)
+
+        semantic_cases = (
+            ("--agent", "claude", "--model", "anthropic/mock", "--opencode-auth-file", str(valid)),
+            ("--agent", "opencode", "--opencode-auth-file", str(valid)),
+        )
+        for arguments in semantic_cases:
+            with self.subTest(arguments=arguments):
+                completed = self.invoke(*arguments, "--dry-run")
+                self.assertEqual(completed.returncode, 2)
+
+        insecure = self.root / "insecure-auth.json"
+        insecure.write_text(valid.read_text(encoding="utf-8"), encoding="utf-8")
+        insecure.chmod(0o644)
+        symlink = self.root / "linked-auth.json"
+        symlink.symlink_to(valid)
+        wrong_provider = self.root / "wrong-provider-auth.json"
+        wrong_provider.write_text(
+            json.dumps({"anthropic": {"type": "api", "key": "wrong-secret"}}),
+            encoding="utf-8",
+        )
+        wrong_provider.chmod(0o600)
+        oauth = self.root / "oauth-auth.json"
+        oauth.write_text(
+            json.dumps(
+                {
+                    "opencode": {
+                        "type": "oauth",
+                        "access": "oauth-secret",
+                        "refresh": "refresh-secret",
+                        "expires": 9999999999,
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        oauth.chmod(0o600)
+        malformed = self.root / "malformed-auth.json"
+        malformed.write_text('{"secret":"must-not-echo"', encoding="utf-8")
+        malformed.chmod(0o600)
+        oversized = self.root / "oversized-auth.json"
+        oversized.write_bytes(b"x" * (eval_run.OPENCODE_AUTH_MAX_BYTES + 1))
+        oversized.chmod(0o600)
+        directory = self.root / "auth-directory"
+        directory.mkdir()
+        fifo = self.root / "auth-fifo"
+        os.mkfifo(fifo, 0o600)
+
+        invalid_sources = (
+            insecure,
+            symlink,
+            wrong_provider,
+            oauth,
+            malformed,
+            oversized,
+            directory,
+            fifo,
+            self.root / "missing-auth.json",
+        )
+        for source in invalid_sources:
+            with self.subTest(source=source.name):
+                completed = self.invoke(
+                    "--agent",
+                    "opencode",
+                    "--provider",
+                    "opencode",
+                    "--model",
+                    "opencode/big-pickle",
+                    "--opencode-auth-file",
+                    str(source),
+                    "--scenario",
+                    "S01",
+                )
+                self.assertEqual(completed.returncode, 2)
+                self.assertNotIn("must-not-echo", completed.stderr)
+                self.assertNotIn("wrong-secret", completed.stderr)
+                self.assertNotIn("oauth-secret", completed.stderr)
+
+    def test_dry_run_records_auth_intent_without_reading_source(self) -> None:
+        missing = self.root / "not-read-during-dry-run.json"
+        completed = self.invoke(
+            "--agent",
+            "opencode",
+            "--provider",
+            "opencode",
+            "--model",
+            "opencode/big-pickle",
+            "--opencode-auth-file",
+            str(missing),
+            "--scenario",
+            "S01",
+            "--dry-run",
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        plan = json.loads(completed.stdout)
+        self.assertEqual(plan["credential_injection"], "isolated-auth-file")
 
     def test_acceptance_requires_stable_git_provenance(self) -> None:
         results = [

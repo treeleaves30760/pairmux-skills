@@ -81,6 +81,36 @@ checkout is dirty or changes commit during the run, required scenarios/repetitio
 the pass-rate threshold is not met. When
 `--acceptance-profile p4` is requested, an ineligible summary also makes the runner exit nonzero.
 
+OpenCode host credentials are intentionally outside the isolated HOME. To opt into an authenticated
+run, first create a Zen API credential and pass its file explicitly:
+
+```bash
+opencode providers login --provider opencode
+
+python3 evals/run.py \
+  --agent opencode \
+  --provider opencode \
+  --model opencode/big-pickle \
+  --opencode-auth-file "${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json" \
+  --acceptance-profile p4 \
+  --scenario S01-S10 \
+  --repeat 3 \
+  --timeout 180 \
+  --pairmux-bin ../pairmux/bin/pairmux \
+  --output-dir evals/runs
+```
+
+The source must be a current-user-owned regular file with mode `0600` or stricter. The runner reads
+only the selected model provider's non-empty `api` record, writes that reduced record as `0600` under
+each episode's isolated XDG data directory, and removes it with the mode-0700 control root. It never
+puts the source path, value, hash, or key length in generated agent argv, result, summary, or control
+metadata. Without this flag the runner does not search host OpenCode auth or inherit OpenCode
+auth-content variables. The benchmark assumes trusted fixtures and a cooperative same-UID agent:
+native transcript and log artifacts preserve what that agent emits, so use a restricted Zen
+workspace/key because an agent shell can read and print any credential available to its own process.
+Credential unlink and control-root removal are verified after every outcome; cleanup failure fails
+the episode and stops the remaining schedule.
+
 The adapters deliberately use stable, non-interactive output modes:
 
 | agent | runner invocation details |
@@ -125,6 +155,8 @@ after the agent process group has ended. Each episode gets:
 - an OpenCode scenario initialized as its own clean committed nested Git repository, with host Git
   config, attributes, templates, and hooks disabled, so both `--dir` and project-root discovery
   resolve to the isolated scenario rather than the benchmark checkout;
+- optional, explicit OpenCode API auth minimized to the selected provider in an ephemeral `0600`
+  isolated auth file; host auth and auth-content environment variables are never inherited;
 - model-free OpenCode `debug skill` / Codex `debug prompt-input` discovery preflights (mock runs use
   an explicit mock contract); missing or leaked host paths fail closed;
 - a unique `PAIRMUX_SOCKET`, `PAIRMUX_STATE_DIR`, and episode id;

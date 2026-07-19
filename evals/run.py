@@ -17,6 +17,7 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -40,8 +41,15 @@ BROKER_RESPONSE_SCHEMA = "pairmux.eval.exec-result.v1"
 BROKER_REJECTION_SCHEMA = "pairmux.eval.rejection.v1"
 BROKER_MAX_FRAME_BYTES = 32 * 1024
 EARLY_FAILURE_TAIL_BYTES = 64 * 1024
+OPENCODE_AUTH_MAX_BYTES = 1024 * 1024
 RUN_FATAL_FAILURE_CLASSES = frozenset(
-    {"provider_auth_failed", "provider_rate_limited", "provider_unavailable"}
+    {
+        "control_cleanup_failed",
+        "credential_cleanup_failed",
+        "provider_auth_failed",
+        "provider_rate_limited",
+        "provider_unavailable",
+    }
 )
 SKILL_DISCOVERY_PATHS = {
     "opencode": Path(".config/opencode/skills/pairmux"),
@@ -49,6 +57,14 @@ SKILL_DISCOVERY_PATHS = {
     # Codex discovers shared skills from .agents/skills before legacy user roots.
     "codex": Path(".agents/skills/pairmux"),
 }
+
+
+class EpisodeCleanupError(RuntimeError):
+    def __init__(self, failure_class: str):
+        super().__init__(f"episode cleanup failed: {failure_class}")
+        self.failure_class = failure_class
+
+
 GENERATED_NAMES = {
     "bad-transcript.txt",
     "check.out",
@@ -575,6 +591,54 @@ def inferred_provider(model: str | None) -> str | None:
     if not model or "/" not in model:
         return None
     return model.split("/", 1)[0]
+
+
+def load_opencode_api_auth(path: Path, provider: str) -> dict[str, object]:
+    """Read one explicitly selected API credential without following links."""
+    source = Path(os.path.abspath(os.path.expanduser(path)))
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    elif source.is_symlink():
+        raise ValueError("--opencode-auth-file must not be a symbolic link")
+    try:
+        descriptor = os.open(source, flags)
+    except OSError as error:
+        raise ValueError(
+            f"cannot securely open --opencode-auth-file: {error.strerror or type(error).__name__}"
+        ) from error
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError("--opencode-auth-file must be a regular file")
+        if hasattr(os, "geteuid") and metadata.st_uid != os.geteuid():
+            raise ValueError("--opencode-auth-file must be owned by the current user")
+        if stat.S_IMODE(metadata.st_mode) & 0o077:
+            raise ValueError("--opencode-auth-file permissions must be 0600 or stricter")
+        if metadata.st_size > OPENCODE_AUTH_MAX_BYTES:
+            raise ValueError("--opencode-auth-file exceeds the 1 MiB safety limit")
+        with os.fdopen(descriptor, "rb") as stream:
+            descriptor = -1
+            raw_payload = stream.read(OPENCODE_AUTH_MAX_BYTES + 1)
+            if len(raw_payload) > OPENCODE_AUTH_MAX_BYTES:
+                raise ValueError("--opencode-auth-file exceeds the 1 MiB safety limit")
+            try:
+                payload = json.loads(raw_payload.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise ValueError("--opencode-auth-file is not valid UTF-8 JSON") from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+    if not isinstance(payload, dict):
+        raise ValueError("--opencode-auth-file must contain a provider object")
+    record = payload.get(provider)
+    if not isinstance(record, dict):
+        raise ValueError("--opencode-auth-file does not contain the selected model provider")
+    key = record.get("key")
+    if record.get("type") != "api" or not isinstance(key, str) or not key:
+        raise ValueError("selected OpenCode credential must be a non-empty api record")
+    return {provider: {"type": "api", "key": key}}
 
 
 def verify_skill_discovery(
@@ -1816,6 +1880,96 @@ def atomic_json(path: Path, payload: object) -> None:
     os.replace(temporary, path)
 
 
+def atomic_private_json(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.chmod(0o700)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            descriptor = -1
+            json.dump(payload, stream, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        path.chmod(0o600)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+
+
+def install_opencode_auth(
+    env: dict[str, str], payload: dict[str, object]
+) -> tuple[dict[str, object], Path]:
+    provider = next(iter(payload))
+    destination = Path(env["XDG_DATA_HOME"]) / "opencode/auth.json"
+    atomic_private_json(destination, payload)
+    metadata = destination.stat()
+    if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o600:
+        raise RuntimeError("isolated OpenCode credential permissions are invalid")
+    return (
+        {
+            "method": "isolated-auth-file",
+            "provider": provider,
+            "verified": True,
+            "cleanup_verified": False,
+        },
+        destination,
+    )
+
+
+def make_tree_removable(root: Path) -> None:
+    if not root.is_dir():
+        return
+    for current, directories, files in os.walk(root, topdown=False, followlinks=False):
+        current_path = Path(current)
+        for name in files:
+            path = current_path / name
+            try:
+                if not path.is_symlink():
+                    path.chmod(0o600)
+            except OSError:
+                pass
+        for name in directories:
+            path = current_path / name
+            try:
+                if not path.is_symlink():
+                    path.chmod(0o700)
+            except OSError:
+                pass
+        try:
+            current_path.chmod(0o700)
+        except OSError:
+            pass
+
+
+def cleanup_control_root(control_root: Path, credential_path: Path | None) -> str | None:
+    failure: str | None = None
+    if credential_path is not None:
+        try:
+            credential_path.unlink(missing_ok=True)
+        except OSError:
+            failure = "credential_cleanup_failed"
+        if os.path.lexists(credential_path):
+            failure = "credential_cleanup_failed"
+    make_tree_removable(control_root)
+    try:
+        shutil.rmtree(control_root)
+    except OSError:
+        if failure is None:
+            failure = "control_cleanup_failed"
+    if os.path.lexists(control_root):
+        try:
+            shutil.rmtree(control_root)
+        except OSError:
+            pass
+        if failure is None:
+            failure = "control_cleanup_failed"
+    return failure
+
+
 def relative(path: Path, root: Path) -> str:
     return str(path.relative_to(root))
 
@@ -1878,6 +2032,7 @@ def run_episode(
     agent_version: str,
     model: str | None,
     provider: str | None,
+    opencode_auth: dict[str, object] | None,
     codex_sandbox: str,
     real_pairmux: str,
     pairmux_version: str,
@@ -2014,6 +2169,14 @@ def run_episode(
         "method": "not-run",
         "path": str(skill_dir / "SKILL.md"),
     }
+    credential_injection: dict[str, object] = {
+        "method": "none",
+        "provider": None,
+        "verified": False,
+        "cleanup_verified": False,
+    }
+    credential_path: Path | None = None
+    control_cleanup_failure: str | None = None
     broker: PairmuxBroker | None = None
     try:
         if setup_result.returncode == 0 and not setup_result.timed_out and not setup_result.start_error:
@@ -2022,6 +2185,11 @@ def run_episode(
             control_hashes[env_file] = sha256_file(env_file)
             env_file.chmod(0o444)
             verify_hashes(control_hashes)
+
+            if opencode_auth is not None:
+                credential_injection, credential_path = install_opencode_auth(
+                    clean_env, opencode_auth
+                )
 
             project_isolation = prepare_agent_project_isolation(
                 agent=agent,
@@ -2129,36 +2297,46 @@ def run_episode(
             calls_path.touch()
             rejections_path.touch()
     finally:
-        if broker is not None:
-            broker.stop_and_finalize()
-        cleanup_tmux(socket_name, setup_env, evidence_dir / "cleanup.log")
-        shutil.rmtree(Path(shell_path_guard["BASH_ENV"]).parent, ignore_errors=True)
+        try:
+            if broker is not None:
+                broker.stop_and_finalize()
+            cleanup_tmux(socket_name, setup_env, evidence_dir / "cleanup.log")
+            shutil.rmtree(Path(shell_path_guard["BASH_ENV"]).parent, ignore_errors=True)
 
-        for name in (
-            "setup.stdout.log",
-            "setup.stderr.log",
-            "agent.stderr.log",
-            "check.stdout.log",
-            "check.stderr.log",
-            "cleanup.log",
-            "transcript.jsonl",
-            "pairmux-calls.jsonl",
-            "broker-rejections.jsonl",
-            "trace-proof.json",
-            "skill-discovery.log",
-        ):
-            source = evidence_dir / name
-            if source.is_file():
-                shutil.copy2(source, episode_root / name)
-        if env_file.is_file():
-            shutil.copy2(env_file, artifact_root / "env.sh")
-        if skill_dir.is_dir():
-            shutil.copytree(skill_dir, skill_artifact_dir)
-        else:
-            skill_artifact_dir.mkdir()
-        state_artifact = artifact_root / "state"
-        if state_dir.is_dir():
-            shutil.copytree(state_dir, state_artifact)
+            for name in (
+                "setup.stdout.log",
+                "setup.stderr.log",
+                "agent.stderr.log",
+                "check.stdout.log",
+                "check.stderr.log",
+                "cleanup.log",
+                "transcript.jsonl",
+                "pairmux-calls.jsonl",
+                "broker-rejections.jsonl",
+                "trace-proof.json",
+                "skill-discovery.log",
+            ):
+                source = evidence_dir / name
+                if source.is_file():
+                    shutil.copy2(source, episode_root / name)
+            if env_file.is_file():
+                shutil.copy2(env_file, artifact_root / "env.sh")
+            if skill_dir.is_dir():
+                shutil.copytree(skill_dir, skill_artifact_dir)
+            else:
+                skill_artifact_dir.mkdir()
+            state_artifact = artifact_root / "state"
+            if state_dir.is_dir():
+                shutil.copytree(state_dir, state_artifact)
+        finally:
+            active_error = sys.exc_info()[1]
+            try:
+                control_cleanup_failure = cleanup_control_root(control_root, credential_path)
+            except Exception:
+                control_cleanup_failure = "control_cleanup_failed"
+            credential_injection["cleanup_verified"] = control_cleanup_failure is None
+            if control_cleanup_failure is not None:
+                raise EpisodeCleanupError(control_cleanup_failure) from active_error
         control_manifest = {
             "schema": "pairmux.eval.control-manifest.v1",
             "control_root_exposed_in_task": False,
@@ -2169,6 +2347,7 @@ def run_episode(
             "broker_denied_cwd_requests_are_audited": True,
             "nonfatal_broker_policy_rejection_codes": ["cwd-outside-work-root"],
             "host_home_inherited": False,
+            "credential_injection": credential_injection,
             "agent_project_isolation": project_isolation,
             "skill_discovery_path": skill_discovery_path,
             "skill_tree_sha256": skill_tree_sha256,
@@ -2177,7 +2356,6 @@ def run_episode(
             },
         }
         atomic_json(artifact_root / "control-manifest.json", control_manifest)
-        shutil.rmtree(control_root, ignore_errors=True)
 
     category = failure_class(setup_result, agent_result, check_result)
     expected_handoff = bool(
@@ -2213,6 +2391,8 @@ def run_episode(
         "model": model or "default",
         "provider": provider or inferred_provider(model) or "unverified-default",
         "provider_verified": provider is not None,
+        "credential_injection": credential_injection,
+        "control_cleanup_failure_class": control_cleanup_failure,
         "scenario": scenario,
         "repeat": repetition,
         "pass": category is None,
@@ -2492,6 +2672,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--provider", type=non_empty_text, help="actual model provider; required for acceptance evidence"
     )
     parser.add_argument(
+        "--opencode-auth-file",
+        type=Path,
+        help="explicit 0600 OpenCode auth.json; only the selected API provider is isolated",
+    )
+    parser.add_argument(
         "--acceptance-profile",
         choices=("none", "p4"),
         default="none",
@@ -2538,6 +2723,11 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(
             f"--provider {args.provider!r} does not match model prefix {model_provider!r}"
         )
+    if args.opencode_auth_file is not None:
+        if args.agent != "opencode":
+            parser.error("--opencode-auth-file is only valid with --agent opencode")
+        if model_provider is None:
+            parser.error("--opencode-auth-file requires --model with a provider prefix")
     try:
         scenarios = parse_scenarios(args.scenario, discover_scenarios())
     except ValueError as error:
@@ -2554,6 +2744,9 @@ def main(argv: list[str] | None = None) -> int:
                     "scenario": scenario,
                     "repeat": repetition,
                     "cwd": str(SCENARIOS_DIR / scenario),
+                    "credential_injection": (
+                        "isolated-auth-file" if args.opencode_auth_file else "none"
+                    ),
                     "argv": build_agent_argv(
                         args.agent,
                         agent_executable,
@@ -2578,6 +2771,14 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"pairmux proxy is missing: {PROXY_SOURCE}")
     if not SKILL_SOURCE.is_dir() or not (SKILL_SOURCE / "SKILL.md").is_file():
         parser.error(f"canonical pairmux skill is missing: {SKILL_SOURCE}")
+
+    opencode_auth: dict[str, object] | None = None
+    if args.opencode_auth_file is not None:
+        assert model_provider is not None
+        try:
+            opencode_auth = load_opencode_api_auth(args.opencode_auth_file, model_provider)
+        except ValueError as error:
+            parser.error(str(error))
 
     run_started_at = utc_now()
     run_started = time.monotonic()
@@ -2607,6 +2808,7 @@ def main(argv: list[str] | None = None) -> int:
                         agent_version=agent_version,
                         model=args.model,
                         provider=args.provider,
+                        opencode_auth=opencode_auth,
                         codex_sandbox=args.codex_sandbox,
                         real_pairmux=real_pairmux,
                         pairmux_version=pairmux_version,
@@ -2614,7 +2816,12 @@ def main(argv: list[str] | None = None) -> int:
                         git_start=git_start,
                         timeout=args.timeout,
                     )
-                except Exception as error:  # Keep later episodes runnable after a harness failure.
+                except Exception as error:  # Normalize harness failures into auditable episodes.
+                    normalized_failure = (
+                        error.failure_class
+                        if isinstance(error, EpisodeCleanupError)
+                        else "runner_error"
+                    )
                     failure_root = run_root / "episodes" / f"{scenario}-r{repetition:02d}-runner-error"
                     failure_root.mkdir(parents=True, exist_ok=True)
                     (failure_root / "traceback.log").write_text(traceback.format_exc(), encoding="utf-8")
@@ -2632,8 +2839,22 @@ def main(argv: list[str] | None = None) -> int:
                         "pass": False,
                         "outcome": "failed",
                         "steps": 0,
+                        "broker_policy_rejections": 0,
                         "wall_time_seconds": 0.0,
-                        "failure_class": "runner_error",
+                        "failure_class": normalized_failure,
+                        "agent_observed_failure_class": None,
+                        "credential_injection": {
+                            "method": "isolated-auth-file" if opencode_auth else "none",
+                            "provider": model_provider if opencode_auth else None,
+                            "verified": False,
+                            "cleanup_verified": False,
+                        },
+                        "control_cleanup_failure_class": (
+                            normalized_failure
+                            if normalized_failure
+                            in {"credential_cleanup_failed", "control_cleanup_failed"}
+                            else None
+                        ),
                         "error": f"{type(error).__name__}: {error}",
                         "pairmux_version": pairmux_version,
                         "pairmux_path": real_pairmux,

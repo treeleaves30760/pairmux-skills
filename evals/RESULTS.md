@@ -21,6 +21,7 @@ claim can be reproduced and audited.
 - skill: `<tree sha256>`, `SKILL.md <sha256>`
 - sandbox/config: `<Codex sandbox or agent-specific notes>`; project isolation
   `<result.json agent_project_isolation.method>`
+- credential injection: `<none or isolated-auth-file>`; provider `<id>`; never record source/secret
 - provenance: git `<commit>` to `<end_commit>` (`dirty=false`, `end_dirty=false`, `stable=true`)
 - fixtures: `summary.json.fixture_sha256` (per-scenario file/hash map)
 - schedule: `<completed>/<planned>` episodes; `<skipped>` skipped; stop reason `<reason or null>`
