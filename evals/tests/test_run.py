@@ -1,0 +1,852 @@
+#!/usr/bin/env python3
+"""Tests for the model-free eval runner harness."""
+
+from __future__ import annotations
+
+import hashlib
+import importlib.util
+import json
+import os
+from pathlib import Path
+import shutil
+import socket
+import struct
+import subprocess
+import sys
+import tempfile
+import unittest
+
+
+EVALS_DIR = Path(__file__).resolve().parents[1]
+RUNNER = EVALS_DIR / "run.py"
+MOCK_BIN = Path(__file__).with_name("mock_bin.py")
+SPEC = importlib.util.spec_from_file_location("pairmux_eval_run", RUNNER)
+assert SPEC and SPEC.loader
+eval_run = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = eval_run
+SPEC.loader.exec_module(eval_run)
+
+
+class RunnerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="pairmux-eval-test-")
+        self.root = Path(self.temporary.name)
+        self.bin_dir = self.root / "bin"
+        self.bin_dir.mkdir()
+        for name in ("opencode", "claude", "codex", "pairmux"):
+            target = self.bin_dir / name
+            shutil.copy2(MOCK_BIN, target)
+            target.chmod(0o755)
+        self.agent_log = self.root / "agent.jsonl"
+        self.env = os.environ.copy()
+        self.env.update(
+            {
+                "PATH": str(self.bin_dir) + os.pathsep + self.env.get("PATH", ""),
+                "PAIRMUX_MOCK_AGENT_LOG": str(self.agent_log),
+            }
+        )
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def invoke(self, *arguments: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        runner_arguments = list(arguments)
+        if "--pairmux-bin" not in runner_arguments:
+            runner_arguments.extend(["--pairmux-bin", str(self.bin_dir / "pairmux")])
+        return subprocess.run(
+            [sys.executable, str(RUNNER), *runner_arguments],
+            cwd=EVALS_DIR.parent,
+            env=env or self.env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=20,
+        )
+
+    def result_for(self, completed: subprocess.CompletedProcess[str]) -> tuple[Path, dict[str, object]]:
+        run_root = Path(completed.stdout.strip().splitlines()[-1])
+        with (run_root / "results.jsonl").open(encoding="utf-8") as stream:
+            result = json.loads(stream.readline())
+        return run_root, result
+
+    def test_scenario_selectors_support_repeats_and_ranges(self) -> None:
+        available = {1: "S01", 2: "S02", 3: "S03", 6: "S06"}
+        self.assertEqual(eval_run.parse_scenarios(["S01-S03", "6", "S02"], available), ["S01", "S02", "S03", "S06"])
+        with self.assertRaisesRegex(ValueError, "ascending"):
+            eval_run.parse_scenarios(["S03-S01"], available)
+        with self.assertRaisesRegex(ValueError, "unknown"):
+            eval_run.parse_scenarios(["S04"], available)
+
+    def test_proxy_preserves_literal_argv_and_nonzero_exit(self) -> None:
+        runtime = Path(tempfile.mkdtemp(prefix="pmx-proxy-", dir="/tmp")).resolve()
+        self.addCleanup(shutil.rmtree, runtime, True)
+        proxy = runtime / "bin" / "pairmux"
+        proxy.parent.mkdir(parents=True)
+        shutil.copy2(EVALS_DIR / "pairmux_proxy.py", proxy)
+        proxy.chmod(0o755)
+        real = runtime / "real-pairmux"
+        shutil.copy2(self.bin_dir / "pairmux", real)
+        real.chmod(0o755)
+        broker_env = self.env.copy()
+        broker_env.pop("PAIRMUX_STATE_NAMESPACE", None)
+        broker_env.update(
+            {
+                "PAIRMUX_SOCKET": "proxy-test",
+                "PAIRMUX_STATE_DIR": str(self.root / "proxy-state"),
+            }
+        )
+        broker = eval_run.PairmuxBroker(
+            runtime / "broker.sock",
+            real_pairmux=real,
+            real_pairmux_sha256=eval_run.sha256_file(real),
+            fixed_env=broker_env,
+            allowed_cwd=self.root,
+            expected_socket="proxy-test",
+        )
+        broker.start()
+        client_env = broker_env.copy()
+        client_env.update(
+            {
+                "PAIRMUX_SOCKET": "client-forged-socket",
+                "PAIRMUX_STATE_DIR": str(self.root / "client-forged-state"),
+                "PAIRMUX_REAL_BIN": "/client/cannot/choose/this",
+            }
+        )
+        argv = ["mock-fail", "two words", "$(literal)", "quote'and\"double"]
+        try:
+            completed = subprocess.run(
+                [str(proxy), *argv],
+                cwd=self.root,
+                env=client_env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=5,
+            )
+        finally:
+            trace = broker.stop_and_finalize()
+        self.assertEqual(completed.returncode, 23, completed.stderr)
+        self.assertEqual(completed.stdout.strip(), "broker stdout preserved")
+        self.assertEqual(completed.stderr.strip(), "broker stderr preserved")
+        self.assertEqual(trace.errors, [])
+        self.assertEqual(len(trace.calls), 1)
+        record = trace.calls[0]
+        self.assertEqual(record["argv"], argv)
+        self.assertEqual(record["exit_code"], 23)
+        self.assertIsInstance(record["pid"], int)
+        self.assertEqual(record["process_group"], record["pid"])
+        self.assertEqual(record["client_uid"], os.geteuid())
+        self.assertEqual(record["pairmux_socket"], "proxy-test")
+        self.assertEqual(record["pairmux_state_dir"], str(self.root / "proxy-state"))
+        self.assertTrue(record["started_at"])
+        self.assertTrue(record["finished_at"])
+
+    def test_shell_path_guard_survives_login_shell_path_rewrites(self) -> None:
+        runtime = self.root / "guard-runtime"
+        guard = eval_run.install_shell_path_guard(runtime, self.bin_dir)
+        self.addCleanup(shutil.rmtree, Path(guard["BASH_ENV"]).parent, True)
+        env = os.environ.copy()
+        env.update(guard)
+        completed = subprocess.run(
+            ["bash", "-c", "command -v pairmux"],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=5,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(Path(completed.stdout.strip()).resolve(), (self.bin_dir / "pairmux").resolve())
+        zsh = shutil.which("zsh")
+        if zsh:
+            completed = subprocess.run(
+                [zsh, "-lc", "command -v pairmux"],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=5,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(
+                Path(completed.stdout.strip()).resolve(),
+                (self.bin_dir / "pairmux").resolve(),
+            )
+
+    def test_dry_run_has_no_side_effects_and_passes_task_as_argv(self) -> None:
+        output_dir = self.root / "dry-output"
+        completed = self.invoke(
+            "--agent",
+            "opencode",
+            "--scenario",
+            "S01-S02",
+            "--repeat",
+            "2",
+            "--output-dir",
+            str(output_dir),
+            "--dry-run",
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        plans = [json.loads(line) for line in completed.stdout.splitlines()]
+        self.assertEqual(len(plans), 4)
+        self.assertFalse(output_dir.exists())
+        self.assertFalse(self.agent_log.exists())
+        task = (EVALS_DIR / "scenarios" / "S01" / "TASK.md").read_text(encoding="utf-8")
+        first_argv = plans[0]["argv"]
+        self.assertIn(task, first_argv)
+        self.assertFalse(any("$(cat" in value for value in first_argv))
+
+    def test_generated_env_shell_quotes_output_paths(self) -> None:
+        output_dir = self.root / "runs-$(touch INJECTED)"
+        completed = self.invoke(
+            "--agent",
+            "opencode",
+            "--scenario",
+            "S01",
+            "--timeout",
+            "5",
+            "--output-dir",
+            str(output_dir),
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        run_root, result = self.result_for(completed)
+        scenario_dir = run_root / result["paths"]["episode"] / "work/S01"
+        self.assertFalse((scenario_dir / "INJECTED").exists())
+        self.assertFalse((self.root / "INJECTED").exists())
+        self.assertFalse((scenario_dir / "env.sh").exists())
+        env_artifact = run_root / result["paths"]["episode"] / "runner-artifacts/env.sh"
+        self.assertNotIn("$(touch INJECTED)", env_artifact.read_text(encoding="utf-8"))
+
+    def test_generated_env_shell_quotes_tmpdir(self) -> None:
+        tmpdir = self.root / "tmp-$(touch INJECTED_TMPDIR)"
+        tmpdir.mkdir()
+        env = self.env.copy()
+        env["TMPDIR"] = str(tmpdir)
+        completed = self.invoke(
+            "--agent",
+            "opencode",
+            "--scenario",
+            "S01",
+            "--timeout",
+            "5",
+            "--output-dir",
+            str(self.root / "tmpdir-runs"),
+            env=env,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertFalse((self.root / "INJECTED_TMPDIR").exists())
+
+    def test_setup_refuses_to_delete_unexpected_state_directory(self) -> None:
+        scenario_dir = eval_run.copy_scenario("S01", self.root / "state-guard-work")
+        outside = self.root / "must-survive"
+        outside.mkdir()
+        sentinel = outside / "sentinel"
+        sentinel.write_text("keep", encoding="utf-8")
+        env = self.env.copy()
+        env.update(
+            {
+                "PAIRMUX_EVAL_STATE_DIR": str(outside),
+                "PAIRMUX_REAL_BIN": str(self.bin_dir / "pairmux"),
+            }
+        )
+        completed = subprocess.run(
+            [str(scenario_dir / "setup.sh")],
+            cwd=scenario_dir,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=5,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertTrue(sentinel.is_file())
+        self.assertIn("refusing to reset unexpected eval state directory", completed.stderr)
+
+    def test_all_agent_adapters_run_without_a_model(self) -> None:
+        for agent in ("opencode", "claude", "codex"):
+            with self.subTest(agent=agent):
+                self.agent_log.unlink(missing_ok=True)
+                output_dir = self.root / f"runs-{agent}"
+                completed = self.invoke(
+                    "--agent",
+                    agent,
+                    "--scenario",
+                    "S01",
+                    "--timeout",
+                    "5",
+                    "--output-dir",
+                    str(output_dir),
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                run_root, result = self.result_for(completed)
+                self.assertTrue(result["pass"])
+                self.assertEqual(result["steps"], 2)
+                self.assertEqual(result["failure_class"], None)
+                self.assertEqual(result["agent_version"], f"{agent} mock-1.0")
+                self.assertEqual(result["model"], "default")
+                self.assertEqual(result["pairmux_path"], str((self.bin_dir / "pairmux").resolve()))
+                self.assertEqual(result["pairmux_sha256"], eval_run.sha256_file(self.bin_dir / "pairmux"))
+                self.assertTrue((run_root / "summary.json").is_file())
+                self.assertTrue((run_root / "summary.md").is_file())
+                skill_dir = run_root / result["skill_install_dir"]
+                self.assertTrue((skill_dir / "SKILL.md").is_file())
+                self.assertEqual(result["skill_tree_sha256"], eval_run.sha256_tree(skill_dir))
+                self.assertEqual(result["skill_tree_sha256"], eval_run.sha256_tree(eval_run.SKILL_SOURCE))
+
+                invocation = json.loads(self.agent_log.read_text(encoding="utf-8").splitlines()[0])
+                task = (EVALS_DIR / "scenarios" / "S01" / "TASK.md").read_text(encoding="utf-8")
+                self.assertEqual(invocation["task_arguments"], [task])
+                self.assertTrue(invocation["loaded_skill_exists"])
+                self.assertEqual(Path(invocation["loaded_skill"]).resolve(), Path(result["skill_discovery_path"]).resolve() / "SKILL.md")
+                self.assertIsNone(invocation["host_poison"])
+                self.assertIsNone(invocation["real_bin_exposed"])
+                argv = invocation["argv"]
+                if agent == "opencode":
+                    self.assertIn("--pure", argv)
+                    self.assertIn("--auto", argv)
+                    self.assertEqual(argv[argv.index("--format") + 1], "json")
+                    self.assertEqual(invocation["opencode_disable_project_config"], "1")
+                elif agent == "claude":
+                    self.assertEqual(argv[argv.index("--output-format") + 1], "stream-json")
+                else:
+                    self.assertEqual(argv[argv.index("--sandbox") + 1], "danger-full-access")
+                    self.assertIn("--json", argv)
+                    self.assertTrue(invocation["codex_home_exists"])
+
+                calls_path = run_root / result["paths"]["pairmux_calls"]
+                calls = [json.loads(line) for line in calls_path.read_text(encoding="utf-8").splitlines()]
+                self.assertEqual(calls[0]["argv"], ["new", "--name", "mock"])
+                self.assertEqual(
+                    calls[1]["argv"],
+                    ["run", "mock", "printf '%s\\n' PAIRMUX-S01-OK"],
+                )
+                self.assertEqual([call["exit_code"] for call in calls], [0, 0])
+                self.assertTrue(all(call["started_at"] for call in calls))
+                self.assertTrue(all(call["finished_at"] for call in calls))
+
+    def test_repeats_use_distinct_episode_socket_and_state(self) -> None:
+        completed = self.invoke(
+            "--agent",
+            "opencode",
+            "--scenario",
+            "S01",
+            "--repeat",
+            "2",
+            "--timeout",
+            "5",
+            "--output-dir",
+            str(self.root / "repeat-runs"),
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        run_root = Path(completed.stdout.strip().splitlines()[-1])
+        results = [
+            json.loads(line)
+            for line in (run_root / "results.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(len(results), 2)
+        self.assertEqual({result["repeat"] for result in results}, {1, 2})
+        self.assertEqual(len({result["episode_id"] for result in results}), 2)
+        self.assertEqual(len({result["socket"] for result in results}), 2)
+        self.assertEqual(len({result["state_dir"] for result in results}), 2)
+
+    def test_timeout_kills_agent_process_group_and_still_checks(self) -> None:
+        env = self.env.copy()
+        env["PAIRMUX_MOCK_MODE"] = "hang"
+        env["PAIRMUX_MOCK_CHILD_LOG"] = str(self.root / "child.jsonl")
+        completed = self.invoke(
+            "--agent",
+            "claude",
+            "--scenario",
+            "S01",
+            "--timeout",
+            "0.5",
+            "--output-dir",
+            str(self.root / "timeout-runs"),
+            env=env,
+        )
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        run_root, result = self.result_for(completed)
+        self.assertEqual(result["failure_class"], "agent_timeout")
+        self.assertTrue(result["timed_out"])
+        self.assertFalse(result["pass"])
+        self.assertTrue((run_root / result["paths"]["check_stdout"]).is_file())
+        self.assertTrue((run_root / result["paths"]["check_stderr"]).is_file())
+
+    def test_timeout_preserves_interrupted_proxy_call_record(self) -> None:
+        env = self.env.copy()
+        env["PAIRMUX_MOCK_MODE"] = "hang_pairmux"
+        completed = self.invoke(
+            "--agent",
+            "opencode",
+            "--scenario",
+            "S01",
+            "--timeout",
+            "0.5",
+            "--output-dir",
+            str(self.root / "proxy-timeout-runs"),
+            env=env,
+        )
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        run_root, result = self.result_for(completed)
+        self.assertEqual(result["failure_class"], "agent_timeout")
+        self.assertEqual(result["steps"], 1)
+        calls_path = run_root / result["paths"]["pairmux_calls"]
+        call = json.loads(calls_path.read_text(encoding="utf-8"))
+        self.assertEqual(call["argv"], ["run", "mock", "HANG-FOREVER"])
+        self.assertIsInstance(call["exit_code"], int)
+        self.assertLess(call["exit_code"], 0)
+        self.assertTrue(call["finished_at"])
+
+    def test_s05_human_handoff_timeout_is_an_expected_pass(self) -> None:
+        env = self.env.copy()
+        env["PAIRMUX_MOCK_MODE"] = "human_handoff"
+        completed = self.invoke(
+            "--agent",
+            "claude",
+            "--scenario",
+            "S05",
+            "--timeout",
+            "1.5",
+            "--output-dir",
+            str(self.root / "handoff-runs"),
+            env=env,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        run_root, result = self.result_for(completed)
+        self.assertTrue(result["pass"])
+        self.assertTrue(result["timed_out"])
+        self.assertEqual(result["outcome"], "expected_human_handoff")
+        self.assertIsNone(result["failure_class"])
+        calls_path = run_root / result["paths"]["pairmux_calls"]
+        calls = [json.loads(line) for line in calls_path.read_text(encoding="utf-8").splitlines()]
+        self.assertTrue(eval_run.calls_have_human_wait(calls, require_interrupted=True))
+        self.assertIn("PASS", (run_root / result["paths"]["check_stdout"]).read_text(encoding="utf-8"))
+
+    def test_s05_completed_short_human_wait_cannot_pass_via_transcript(self) -> None:
+        env = self.env.copy()
+        env["PAIRMUX_MOCK_MODE"] = "completed_handoff"
+        completed = self.invoke(
+            "--agent",
+            "opencode",
+            "--scenario",
+            "S05",
+            "--timeout",
+            "2",
+            "--output-dir",
+            str(self.root / "completed-handoff-runs"),
+            env=env,
+        )
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        run_root, result = self.result_for(completed)
+        self.assertFalse(result["pass"])
+        self.assertFalse(result["timed_out"])
+        self.assertEqual(result["failure_class"], "check_failed")
+        calls_path = run_root / result["paths"]["pairmux_calls"]
+        calls = [json.loads(line) for line in calls_path.read_text(encoding="utf-8").splitlines()]
+        self.assertFalse(eval_run.calls_have_human_wait(calls, require_interrupted=True))
+        self.assertIn(
+            "lacked runner deadline/PID proof",
+            (run_root / result["paths"]["check_stderr"]).read_text(encoding="utf-8"),
+        )
+
+    def test_human_wait_proof_requires_effective_interrupted_subcommand(self) -> None:
+        false_positives = [
+            {"argv": ["run", "t1", "echo wait", "--human"], "exit_code": -15},
+            {"argv": ["--socket", "wait", "ls", "--human"], "exit_code": -15},
+            {"argv": ["wait", "t1", "--human", "--timeout", "1ms"], "exit_code": 0},
+        ]
+        self.assertFalse(
+            eval_run.calls_have_human_wait(false_positives, require_interrupted=True)
+        )
+        proof = {
+            "argv": ["--json", "--socket=eval", "wait", "t1", "--human", "--notify"],
+            "exit_code": -15,
+            "runner_timeout_interrupted": True,
+            "runner_timeout_pid_live": True,
+            "runner_timeout_client_live": True,
+            "runner_timeout_client_pgid_match": True,
+        }
+        self.assertTrue(eval_run.calls_have_human_wait([proof], require_interrupted=True))
+
+    def test_s05_proof_rejects_early_signal_wrong_terminal_missing_notify_and_timeout(self) -> None:
+        run_secret = {"argv": ["run", "secret", "./secret.sh"], "exit_code": 0}
+        counterexamples = [
+            {
+                "argv": ["wait", "secret", "--human", "--notify"],
+                "received_signals": [15],
+                "exit_code": -15,
+            },
+            {
+                "argv": ["wait", "other", "--human", "--notify"],
+                "runner_timeout_interrupted": True,
+                "runner_timeout_pid_live": True,
+                "runner_timeout_client_live": True,
+                "runner_timeout_client_pgid_match": True,
+            },
+            {
+                "argv": ["wait", "secret", "--human"],
+                "runner_timeout_interrupted": True,
+                "runner_timeout_pid_live": True,
+                "runner_timeout_client_live": True,
+                "runner_timeout_client_pgid_match": True,
+            },
+            {
+                "argv": ["wait", "secret", "--human", "--notify", "--timeout", "30s"],
+                "runner_timeout_interrupted": True,
+                "runner_timeout_pid_live": True,
+                "runner_timeout_client_live": True,
+                "runner_timeout_client_pgid_match": True,
+            },
+        ]
+        for call in counterexamples:
+            with self.subTest(call=call):
+                self.assertIsNone(eval_run.s05_handoff_call([run_secret, call]))
+        interrupted_wait = {
+            "argv": ["wait", "secret", "--human", "--notify"],
+            "runner_timeout_interrupted": True,
+            "runner_timeout_pid_live": True,
+            "runner_timeout_client_live": True,
+            "runner_timeout_client_pgid_match": True,
+        }
+        failed_prompt = {"argv": ["run", "secret", "./secret.sh"], "exit_code": 7}
+        self.assertIsNone(eval_run.s05_handoff_call([failed_prompt, interrupted_wait]))
+
+    def test_marker_shortcuts_fail_exact_call_validation(self) -> None:
+        cases = {
+            "S01": [{"argv": ["run", "t", "echo PAIRMUX-S01-OK"], "exit_code": 1}],
+            "S03": [{"argv": ["run", "t", "cat haystack.log"], "exit_code": 0}],
+            "S06": [
+                {"argv": ["new", "--name", "py", "--cmd", "python3"], "exit_code": 0},
+                {"argv": ["send", "py", "--text", "1234 * 5678", "--enter"], "exit_code": 0},
+            ],
+            "S08": [
+                {"argv": ["run", "same", "./server.sh"], "exit_code": 0},
+                {"argv": ["run", "same", "./hit.sh"], "exit_code": 0},
+                {"argv": ["log", "same", "--grep", "GET"], "exit_code": 0},
+            ],
+            "S10": [{"argv": ["run", "x", "printf ZT-9QK > token.txt"], "exit_code": 0}],
+        }
+        for scenario, calls in cases.items():
+            with self.subTest(scenario=scenario):
+                self.assertTrue(eval_run.validate_scenario_calls(scenario, calls))
+
+    def test_failed_proxy_calls_do_not_prove_scenarios(self) -> None:
+        cases = {
+            "S03": [
+                {"argv": ["run", "log", "cat haystack.log"], "exit_code": 0},
+                {"argv": ["log", "log", "--grep", "FATAL|E4231"], "exit_code": 7},
+            ],
+            "S04": [
+                {"argv": ["run", "prompt", "./confirm.sh"], "exit_code": 0},
+                {"argv": ["send", "prompt", "--text", "yes", "--enter"], "exit_code": 7},
+            ],
+            "S06": [
+                {"argv": ["new", "--name", "py", "--cmd", "python3"], "exit_code": 0},
+                {"argv": ["send", "py", "--text", "1234 * 5678", "--enter"], "exit_code": 0},
+                {"argv": ["send", "py", "--text", "exit()", "--enter"], "exit_code": 7},
+            ],
+            "S07": [{"argv": ["send", "report", "--text", "q"], "exit_code": 7}],
+            "S08": [
+                {"argv": ["run", "server", "./server.sh"], "exit_code": 0},
+                {"argv": ["run", "client", "./hit.sh"], "exit_code": 0},
+                {"argv": ["log", "server", "--grep", "GET|HTTP"], "exit_code": 7},
+            ],
+            "S09": [
+                {"argv": ["send", "worker", "--key", "C-c"], "exit_code": 7},
+                {"argv": ["run", "worker", "echo WORKER-RECOVERED"], "exit_code": 0},
+            ],
+            "S10": [{"argv": ["peek", "handoff"], "exit_code": 7}],
+        }
+        for scenario, calls in cases.items():
+            with self.subTest(scenario=scenario):
+                self.assertTrue(eval_run.validate_scenario_calls(scenario, calls))
+
+    def test_broker_rejects_client_reported_evidence_and_does_not_scan_agent_files(self) -> None:
+        runtime = Path(tempfile.mkdtemp(prefix="pmx-forge-", dir="/tmp")).resolve()
+        self.addCleanup(shutil.rmtree, runtime, True)
+        real = runtime / "real-pairmux"
+        shutil.copy2(self.bin_dir / "pairmux", real)
+        real.chmod(0o755)
+        broker = eval_run.PairmuxBroker(
+            runtime / "broker.sock",
+            real_pairmux=real,
+            real_pairmux_sha256=eval_run.sha256_file(real),
+            fixed_env=self.env,
+            allowed_cwd=self.root,
+            expected_socket="forge-test",
+        )
+        broker.start()
+        invalid = json.dumps(
+            {
+                "schema": "pairmux.eval.call.v1",
+                "argv": ["wait", "fake", "--human"],
+                "cwd": str(self.root),
+                "exit_code": 0,
+                "pid": os.getpid(),
+            }
+        ).encode()
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.connect(str(runtime / "broker.sock"))
+                client.sendall(struct.pack("!I", len(invalid)) + invalid)
+                client.shutdown(socket.SHUT_WR)
+                client.recv(4096)
+        finally:
+            trace = broker.stop_and_finalize()
+        self.assertEqual(trace.calls, [])
+        self.assertTrue(trace.errors)
+
+        env = self.env.copy()
+        env["PAIRMUX_MOCK_MODE"] = "forge_trace_file"
+        completed = self.invoke(
+            "--agent",
+            "opencode",
+            "--scenario",
+            "S01",
+            "--timeout",
+            "5",
+            "--output-dir",
+            str(self.root / "forge-runs"),
+            env=env,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        _run_root, result = self.result_for(completed)
+        self.assertEqual(result["steps"], 2)
+
+    def test_broker_protocol_error_fails_episode_even_after_real_calls(self) -> None:
+        env = self.env.copy()
+        env["PAIRMUX_MOCK_MODE"] = "forge_broker_evidence"
+        completed = self.invoke(
+            "--agent",
+            "opencode",
+            "--scenario",
+            "S01",
+            "--timeout",
+            "5",
+            "--output-dir",
+            str(self.root / "broker-protocol-runs"),
+            env=env,
+        )
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        _run_root, result = self.result_for(completed)
+        self.assertEqual(result["steps"], 2)
+        self.assertIn("broker protocol error", " ".join(result["trace_validation_errors"]))
+
+    def test_agent_environment_and_control_assets_are_isolated(self) -> None:
+        host_home = self.root / "host-home"
+        (host_home / ".config/opencode/skills/pairmux").mkdir(parents=True)
+        (host_home / ".config/opencode/skills/pairmux/SKILL.md").write_text(
+            "host poison", encoding="utf-8"
+        )
+        env = self.env.copy()
+        env.update(
+            {
+                "HOME": str(host_home),
+                "XDG_CONFIG_HOME": str(host_home / ".config"),
+                "OPENCODE_CONFIG_DIR": str(host_home / ".config/opencode"),
+                "PAIRMUX_HOST_POISON": "must-not-pass",
+            }
+        )
+        completed = self.invoke(
+            "--agent",
+            "opencode",
+            "--scenario",
+            "S01",
+            "--timeout",
+            "5",
+            "--output-dir",
+            str(self.root / "isolated-runs"),
+            env=env,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        run_root, result = self.result_for(completed)
+        invocation = json.loads(self.agent_log.read_text(encoding="utf-8").splitlines()[0])
+        self.assertNotEqual(Path(invocation["home"]), host_home)
+        self.assertIsNone(invocation["host_poison"])
+        self.assertIsNone(invocation["real_bin_exposed"])
+        work = run_root / result["paths"]["episode"] / "work/S01"
+        for name in ("setup.sh", "check.sh", "env.sh", "lib.sh"):
+            self.assertFalse((work / name).exists(), name)
+        manifest = json.loads(
+            (run_root / result["paths"]["control_manifest"]).read_text(encoding="utf-8")
+        )
+        self.assertFalse(manifest["host_home_inherited"])
+        self.assertEqual(manifest["proxy_trace_transport"], "runner-owned-execution-broker")
+        self.assertTrue(manifest["broker_ledger_serialized_after_agent"])
+        self.assertFalse(manifest["broker_request_can_report_evidence"])
+
+    def test_skill_tampering_fails_closed(self) -> None:
+        env = self.env.copy()
+        env["PAIRMUX_MOCK_MODE"] = "mutate_skill"
+        completed = self.invoke(
+            "--agent",
+            "claude",
+            "--scenario",
+            "S01",
+            "--timeout",
+            "5",
+            "--output-dir",
+            str(self.root / "skill-tamper-runs"),
+            env=env,
+        )
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        _run_root, result = self.result_for(completed)
+        self.assertIn("installed skill changed", " ".join(result["trace_validation_errors"]))
+
+    def test_acceptance_metadata_is_explicit_and_fail_closed(self) -> None:
+        completed = self.invoke(
+            "--agent",
+            "codex",
+            "--provider",
+            "openai",
+            "--model",
+            "mock-model",
+            "--acceptance-profile",
+            "p4",
+            "--scenario",
+            "S01",
+            "--timeout",
+            "5",
+            "--output-dir",
+            str(self.root / "acceptance-runs"),
+        )
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        run_root, result = self.result_for(completed)
+        summary = json.loads((run_root / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(result["provider"], "openai")
+        self.assertTrue(result["provider_verified"])
+        self.assertIn("commit", result["git"])
+        self.assertIn("TASK.md", result["scenario_source_sha256"])
+        self.assertFalse(summary["acceptance"]["eligible"])
+        self.assertEqual(summary["acceptance"]["pass_rate_threshold"], 1.0)
+        self.assertIn("Acceptance eligible: **false**", (run_root / "summary.md").read_text())
+
+    def test_provider_and_model_values_are_validated(self) -> None:
+        for arguments in (
+            ("--provider", " "),
+            ("--model", " "),
+            ("--provider", "openai", "--model", "opencode/big-pickle"),
+        ):
+            with self.subTest(arguments=arguments):
+                completed = self.invoke(
+                    "--agent",
+                    "opencode",
+                    "--dry-run",
+                    *arguments,
+                )
+                self.assertEqual(completed.returncode, 2)
+
+    def test_acceptance_requires_stable_git_provenance(self) -> None:
+        results = [
+            {"scenario": f"S{number:02d}", "pass": True}
+            for number in range(1, 11)
+            for _repeat in range(3)
+        ]
+        accepted = eval_run.acceptance_status(
+            profile="p4",
+            agent="opencode",
+            provider_verified=True,
+            model_verified=True,
+            results=results,
+            git={"commit": "a" * 40, "dirty": False, "stable": True},
+        )
+        self.assertTrue(accepted["eligible"])
+        for git in (
+            {"commit": None, "dirty": False, "stable": True},
+            {"commit": "a" * 40, "dirty": False, "stable": False},
+        ):
+            with self.subTest(git=git):
+                rejected = eval_run.acceptance_status(
+                    profile="p4",
+                    agent="opencode",
+                    provider_verified=True,
+                    model_verified=True,
+                    results=results,
+                    git=git,
+                )
+                self.assertFalse(rejected["eligible"])
+
+    def test_check_helpers_find_custom_socket_hashed_state(self) -> None:
+        state = self.root / "state"
+        socket_name = "isolated-test-socket"
+        tmux_root = self.root / "tmux-root"
+        tmux_root.mkdir()
+        identity = os.path.join(str(tmux_root.resolve()), f"tmux-{os.getuid()}", socket_name)
+        digest = hashlib.sha256(identity.encode()).hexdigest()
+        terminal = state / ".sockets" / digest / "worker"
+        terminal.mkdir(parents=True)
+        (terminal / "raw.log").write_text("HASHED-MARKER\n", encoding="utf-8")
+        env = self.env.copy()
+        env.pop("PAIRMUX_STATE_NAMESPACE", None)
+        env.update(
+            {
+                "PAIRMUX_STATE_DIR": str(state),
+                "PAIRMUX_SOCKET": socket_name,
+                "TMUX_TMPDIR": str(tmux_root),
+            }
+        )
+        completed = subprocess.run(
+            [
+                "bash",
+                "-c",
+                '. "$1"; pmx_journal_has worker HASHED-MARKER',
+                "bash",
+                str(EVALS_DIR / "lib.sh"),
+            ],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=5,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_codex_json_scoping_excludes_aggregated_output(self) -> None:
+        transcript = self.root / "codex.jsonl"
+        transcript.write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "item.completed",
+                            "item": {
+                                "type": "command_execution",
+                                "command": "pairmux wait secret --human --notify",
+                                "aggregated_output": "hunter2-correct",
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "item.completed",
+                            "item": {"type": "agent_message", "text": "handoff requested"},
+                        }
+                    ),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        completed = subprocess.run(
+            [
+                "bash",
+                "-c",
+                '. "$1"; pmx_issued_content "$2"',
+                "bash",
+                str(EVALS_DIR / "lib.sh"),
+                str(transcript),
+            ],
+            env=self.env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=5,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("pairmux wait secret --human --notify", completed.stdout)
+        self.assertIn("handoff requested", completed.stdout)
+        self.assertNotIn("hunter2-correct", completed.stdout)
+
+
+if __name__ == "__main__":
+    unittest.main()

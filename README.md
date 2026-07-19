@@ -5,8 +5,8 @@ The canonical [Agent Skill](https://github.com/vercel-labs/skills) that teaches 
 an install map for every SKILL.md-capable agent and an eval suite (S01–S10).
 
 `SKILL.md` is a cross-agent open standard, so **one** skill folder works in Claude Code, Codex CLI,
-Gemini CLI, Cursor, OpenCode, and others. This repo is the source of truth; the pairmux CLI embeds a
-synced copy for `pairmux skill install`.
+Gemini CLI, Cursor, OpenCode, GitHub Copilot, Windsurf, Kiro, Amp, and others. This repo is the source
+of truth; the pairmux CLI embeds a synced copy for `pairmux skill install`.
 
 ```
 pairmux-skills/
@@ -27,7 +27,7 @@ pairmux-skills/
 ## What the skill teaches
 
 - **The golden loop:** `new` → `run` (blocks until done or `--timeout`) → read `status` → `wait`
-  (running) / `send` (awaiting-input) / `log` (truncated) → do what the envelope's `next` says.
+  (running) / `send` (awaiting-input) / `log` (truncated) → read contextual `next` hints in order.
 - **The iron rules:** never sleep-and-guess timing; one command per terminal; answer a prompt once;
   never type or guess a secret (hand off with `wait --human --notify`); prefer reading the journal
   over re-running; `notes` are messages from a human — read and obey them.
@@ -38,7 +38,8 @@ pairmux-skills/
 ### With `pairmux skill install` (ships with the CLI)
 
 ```bash
-pairmux skill install --target claude-code      # or: codex | gemini | cursor | opencode | all
+pairmux skill install --target claude-code
+# targets: claude-code codex gemini cursor opencode copilot windsurf kiro amp agents all
 pairmux skill install --target all --dry-run    # show the paths it would write
 ```
 
@@ -56,9 +57,8 @@ npx skills add treeleaves30760/pairmux-skills -g      # global (user) scope
 mkdir -p ~/.claude/skills && cp -R skills/pairmux ~/.claude/skills/pairmux
 ```
 
-See [`install-map.md`](install-map.md) for every agent's directory (Claude Code, Codex, Gemini,
-Cursor, OpenCode, the universal `~/.agents/skills/` alias) and the AGENTS.md fallback for agents with
-no native skills support.
+See [`install-map.md`](install-map.md) for every verified agent directory and the universal
+`~/.agents/skills/` alias, plus the AGENTS.md fallback for agents with no native skills support.
 
 ## Evals
 
@@ -66,8 +66,8 @@ Ten scenario cards check that an agent uses pairmux correctly — the basic loop
 `sleep`, finding one error in a huge log, confirmations, the never-guess-secrets rule, REPLs, pagers,
 multi-terminal server work, Ctrl-C recovery, and note relay. Each has a `setup.sh`, a natural-language
 `TASK.md` (which never names a pairmux subcommand), and a `check.sh` that asserts the outcome and greps
-the transcript for anti-patterns. See [`evals/README.md`](evals/README.md) for the headless runners
-(Claude Code, Codex) and scoring, and [`evals/RESULTS.md`](evals/RESULTS.md) for recorded runs.
+the transcript for anti-patterns. See [`evals/README.md`](evals/README.md) for the OpenCode, Claude
+Code, and Codex runners and scoring, and [`evals/RESULTS.md`](evals/RESULTS.md) for recorded runs.
 
 ## Requirements
 

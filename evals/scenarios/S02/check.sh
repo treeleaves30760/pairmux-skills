@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # S02 check. Pass = the build ran to completion via pairmux AND the transcript did not sleep-and-guess.
 set -uo pipefail
-SCEN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCEN_DIR="${PAIRMUX_EVAL_SCENARIO_DIR:-$SCRIPT_DIR}"
 # shellcheck source=SCRIPTDIR/../../lib.sh
-. "$SCEN_DIR/../../lib.sh"
+. "$SCRIPT_DIR/../../lib.sh"
 # shellcheck source=/dev/null
-. "$SCEN_DIR/env.sh"
+. "${PAIRMUX_EVAL_ENV_FILE:-$SCEN_DIR/env.sh}"
 TRANSCRIPT="${1:-}"
 
 pmx_any_journal_has "BUILD COMPLETE" \
@@ -16,5 +17,8 @@ pmx_any_journal_has "BUILD COMPLETE" \
 # Read of it echoes that into a tool_result — a fixture artifact, not the agent sleeping.
 pmx_issued_forbids "$TRANSCRIPT" '(^|[^[:alnum:]_])sleep[[:space:]]+[0-9]' \
   || pmx_fail "transcript used a fixed 'sleep N' to guess build timing — use run/wait instead"
+
+pmx_runner_trace_proves S02 \
+  || pmx_fail "runner-owned proxy trace does not prove slow-build.sh ran through pairmux"
 
 pmx_pass "slow build completed and the agent waited without sleep-guessing"

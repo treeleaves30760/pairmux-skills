@@ -1,10 +1,11 @@
 # pairmux skill evals (S01–S10)
 
 Ten scenario cards that check whether an agent, driving only its normal shell tool plus the installed
-`pairmux` skill, uses pairmux correctly. Each scenario is a directory with three files:
+`pairmux` skill, uses pairmux correctly. `run.py` executes them repeatably across OpenCode, Claude
+Code, and Codex. Each scenario is a directory with three files:
 
-- **`setup.sh`** — creates an isolated environment (a unique `PAIRMUX_SOCKET` and `PAIRMUX_STATE_DIR`
-  under the scenario's own `state/`) and any materials, writing an `env.sh` for the runner to source.
+- **`setup.sh`** — creates an isolated environment and any materials, writing an `env.sh`. Manual runs
+  use the scenario's `state/`; the automated runner injects a unique socket and state directory.
   Some scenarios pre-create a terminal in a starting state (a stuck pager, a hung command, a note).
 - **`TASK.md`** — the natural-language task handed to the agent. It never names a pairmux subcommand;
   choosing `run`/`wait`/`send`/… is the skill's job.
@@ -27,10 +28,10 @@ Ten scenario cards that check whether an agent, driving only its normal shell to
 ## Prerequisites
 
 - `tmux >= 3.2`, `python3`, `curl`, and `bash`.
-- The `pairmux` binary on `PATH` **or** a built sibling `../pairmux/bin/pairmux` (the scenarios resolve
-  it automatically and prepend it to `PATH` in `env.sh`).
-- The skill installed into the agent under test (`pairmux skill install --target <agent>`, or copy
-  `skills/pairmux/` per [`install-map.md`](../install-map.md)).
+- An explicit `--pairmux-bin`, a built sibling `../pairmux/bin/pairmux`, or `pairmux` on `PATH` (in
+  that precedence order). The resolved binary path and SHA-256 are recorded in every result.
+- For manual runs, install the skill into the agent under test per [`install-map.md`](../install-map.md).
+  The automated runner uses a fresh HOME/config root and installs only this checkout's canonical skill.
 
 ## Running one scenario by hand
 
@@ -47,36 +48,118 @@ Because `env.sh` exports `PAIRMUX_SOCKET`/`PAIRMUX_STATE_DIR`/`PATH`, the agent 
 this shell inherits them and its `pairmux` calls hit the isolated socket. `check.sh` sources the same
 `env.sh`. Re-running `setup.sh` wipes the previous run (`tmux -L <sock> kill-server` + fresh `state/`).
 
-## Headless runners
+## Automated runner
 
-### Claude Code
-
-```bash
-cd evals/scenarios/S02
-./setup.sh && source ./env.sh
-claude -p "$(cat TASK.md)" \
-  --allowedTools Bash \
-  --max-turns 25 \
-  --output-format stream-json --verbose | tee transcript.jsonl
-./check.sh transcript.jsonl
-```
-
-`--output-format stream-json` records each tool call (including the exact Bash command strings), which
-is what `check.sh` greps for anti-patterns. `--allowedTools Bash` is enough — pairmux is a CLI the
-agent calls through Bash.
-
-### Codex CLI
+Run all scenarios once with the agent's default model:
 
 ```bash
-cd evals/scenarios/S02
-./setup.sh && source ./env.sh
-codex exec --sandbox workspace-write "$(cat TASK.md)" 2>&1 | tee transcript.txt
-./check.sh transcript.txt
+python3 evals/run.py --agent opencode
+python3 evals/run.py --agent claude
+python3 evals/run.py --agent codex
 ```
 
-Use `--sandbox workspace-write` so Codex can run commands unattended. Codex's transcript format
-differs from Claude's, but both include the shell commands the agent ran, so the same `check.sh`
-greps work (plain-text transcripts use whole-file greps — see the S05 note).
+Select repeated scenarios, a model, a timeout, and an artifact parent directory:
+
+```bash
+python3 evals/run.py \
+  --agent opencode \
+  --provider openai \
+  --model openai/gpt-5.2 \
+  --acceptance-profile p4 \
+  --scenario S01-S10 \
+  --repeat 3 \
+  --timeout 240 \
+  --pairmux-bin ../pairmux/bin/pairmux \
+  --output-dir evals/runs
+```
+
+`--scenario` accepts `S01`, `1`, comma-separated values, or an ascending range such as `2-5`; it is
+repeatable. Omitting it selects every discovered scenario. `--dry-run` prints one JSON plan per
+episode and performs no setup, agent, check, or filesystem write. `--provider` records the actual
+provider; a P4 acceptance result is ineligible when provider/model are implicit or inconsistent, the
+checkout is dirty or changes commit during the run, required scenarios/repetitions are missing, or
+the pass-rate threshold is not met. When
+`--acceptance-profile p4` is requested, an ineligible summary also makes the runner exit nonzero.
+
+The adapters deliberately use stable, non-interactive output modes:
+
+| agent | runner invocation details |
+|---|---|
+| OpenCode | `--pure --auto run --format json` |
+| Claude Code | `-p --allowedTools Bash --setting-sources project --strict-mcp-config --output-format stream-json` |
+| Codex | `exec --sandbox <mode> --ephemeral --json`; default sandbox is `danger-full-access` |
+
+Override the Codex policy with `--codex-sandbox read-only|workspace-write|danger-full-access`.
+`danger-full-access` is the default because tmux socket and server operations are not reliably usable
+inside Codex's macOS Seatbelt `workspace-write` policy. Run the benchmark only against trusted
+scenario fixtures.
+
+The runner reads `TASK.md` and passes the complete text as one `subprocess` argv element. It never
+uses a shell, command substitution, or shell quoting to construct an agent command. The shell startup
+guard likewise interpolates only a `shlex.quote`-escaped proxy path. Its activation files live in a
+runner-created mode-0700 `/tmp` directory with a `tempfile`-generated safe name, rather than beneath a
+user-selected output path that Bash could expand through `BASH_ENV`. The agent process starts in a
+new session; a wall-clock timeout terminates and then kills that entire process group. The runner
+itself does not use pairmux to supervise the agent under test.
+
+### Isolation and instrumentation
+
+Every invocation creates `OUTPUT_DIR/<run-id>/`. During an episode, only the fixture work directory
+is agent-facing. A random mode-0700 `/tmp/pairmux-eval-control-*` owns setup/check/lib/env, HOME,
+skill discovery roots, proxy control, terminal state, native transcript, and check evidence. Control
+sources are hash-verified immediately before execution and artifacts are copied into the run only
+after the agent process group has ended. Each episode gets:
+
+- a copied scenario work directory, so setup fixtures and agent writes cannot collide;
+- a canonical skill at isolated XDG OpenCode config, Claude project config, or Codex
+  `$HOME/.agents/skills/pairmux`, with discovery path and hashes in the result;
+- OpenCode external-skill discovery disabled, Claude limited to project setting sources, and Codex
+  given both isolated `HOME` and `CODEX_HOME`;
+- model-free OpenCode `debug skill` / Codex `debug prompt-input` discovery preflights (mock runs use
+  an explicit mock contract); missing or leaked host paths fail closed;
+- a unique `PAIRMUX_SOCKET`, `PAIRMUX_STATE_DIR`, and episode id;
+- a PATH-fronted `pairmux` client that sends exact argv/cwd and its standard streams to a
+  runner-owned execution broker;
+- a native agent transcript, setup/check logs, and exact pairmux call records.
+
+The client cannot submit evidence: its exact request schema contains only argv and cwd. The broker
+uses kernel peer credentials, a fixed private binary and episode environment, then records the real
+child PID, timestamps, and `waitpid` result in runner memory. It passes stdin/stdout/stderr file
+descriptors over the Unix stream socket, so pairmux keeps its normal output behavior without bounded
+proxy buffers. A direct broker request still causes a real fixed-binary execution; client-reported
+PID, status, or finish fields are rejected and any protocol error fails the episode. The ledger is
+serialized only after the agent process group has ended and never scans agent JSON files.
+
+Scenario proofs combine exact broker argv/order/terminal binding with isolated terminal state;
+marker-only files cannot pass. The host binary path and broker environment are not present in the
+agent environment. Setup/check bypass the broker, so `steps` counts only agent calls. This is a
+fail-closed evidence boundary for cooperative benchmark agents, not hostile same-UID isolation; a
+hostile process still requires a separate UID, container, or VM.
+
+Run directories are collision-resistant across simultaneous runners and reruns:
+
+```bash
+evals/runs/<run-id>/
+├── results.jsonl
+├── summary.json
+├── summary.md
+└── episodes/<episode-id>/
+    ├── result.json
+    ├── transcript.jsonl
+    ├── pairmux-calls.jsonl
+    ├── setup.*.log / agent.stderr.log / check.*.log
+    ├── runner-artifacts/{control-manifest.json,skill/,state/,env.sh}
+    └── work/
+```
+
+`results.jsonl` has one `pairmux.eval.episode.v1` object per episode. Required score fields include
+agent/version/provider/model, scenario/repeat, pass/outcome, steps, wall time, failure class, resolved
+binary path/hash, skill discovery/hashes, git dirty/commit data, and fixture hashes. `summary.json` is
+the aggregate `pairmux.eval.summary.v1` document and includes the explicit acceptance decision;
+`summary.md` is its review-friendly table. Failure classes distinguish setup, agent, timeout, check,
+and internal runner failures. Exit 0 means every episode passed and any requested P4 profile is
+eligible. Exit 1 means an episode failed or requested P4 acceptance is ineligible; exit 2 means
+invalid CLI/environment setup.
 
 **Why `env.sh` sets `TMUX_TMPDIR`.** Codex's macOS Seatbelt sandbox only permits writes under the
 workdir, `/tmp`, and `$TMPDIR` — and tmux's default socket dir `/tmp/tmux-UID` is denied anyway
@@ -87,27 +170,42 @@ sandbox-approved — while the unique per-scenario `-L` socket names keep runs i
 
 ### S05 note
 
-S05's correct behaviour is to hand off to a human and block on `wait --human --notify`. With no human,
-that call will sit until its `--timeout`, so give the runner a bounded `--max-turns`/time budget; the
-check passes as long as no password was submitted and a `wait --human` handoff was issued.
+S05 passes as `expected_human_handoff` only when `wait --human --notify` targets the same terminal that
+ran `secret.sh`, contains no explicit short timeout, and the broker's real pairmux child plus its
+connected kernel peer are still live at the runner's wall-clock deadline. The peer must remain in the
+agent process group. Only this synchronized deadline snapshot marks interruption. Historical signals,
+a completed wait, a different terminal, missing `--notify`, or transcript text do not prove handoff.
+Timeouts remain failures for every other scenario.
 
 **What counts as a leak.** Only the password appearing in content the *agent issued* — a command it
 ran or prose it wrote. Reading `secret.sh` before running it (prudent pre-execution inspection) echoes
 the fixture password into a `tool_result`; that is a fixture artifact, not a violation — real secrets
-don't live in the script — and does **not** fail the check. For Claude stream-json transcripts the
-check extracts exactly the issued content (assistant `tool_use` inputs + text blocks, via `jq`, with a
-jq-less line-filter fallback); the same scoping applies to the positive assertion, so a `--human` hint
-merely echoed in an envelope's `next` does not count as a handoff. Plain-text transcripts (codex
-`exec`) can't be reliably separated into issued vs echoed content, so there the greps cover the whole
-file — stricter for codex, by design: avoid `cat`ing `secret.sh` in codex runs.
+don't live in the script — and does **not** fail the check. For Claude stream-json, OpenCode JSON, and
+Codex JSONL, the check extracts issued assistant text/command inputs while excluding tool output. The
+same scoping applies to the positive assertion, so a `--human` hint merely echoed in an envelope's
+`next` does not count as a handoff. The broker ledger is authoritative when an in-flight human wait
+prevents the native transcript event from flushing before timeout.
+
+## Harness tests
+
+The test suite replaces all three agents and pairmux with local executables; it consumes no model
+tokens and does not need credentials:
+
+```bash
+python3 -m unittest discover -s evals/tests -v
+bash -n evals/lib.sh evals/scenarios/*/{setup,check}.sh
+shellcheck evals/lib.sh evals/scenarios/*/{setup,check}.sh
+```
 
 ## Scoring
 
-Per scenario, record **pass/fail** (`check.sh` exit code) and the **step count** (number of pairmux
-commands the agent issued — lower is better for the same outcome). Aggregate as a pass rate across
-S01–S10. Log every run in [`RESULTS.md`](RESULTS.md) with the machine, date, and model/agent version.
+Per scenario, record **pass/fail** and the **step count** from the broker (lower is better for the same
+outcome). Aggregate repeated episodes as a pass rate across S01–S10. Log benchmark runs in
+[`RESULTS.md`](RESULTS.md) and retain the generated `summary.json`/`summary.md` as evidence.
 
 ## Acceptance (from the P4 contract)
 
-- Claude Code passes **S01–S09** headless with the skill installed.
+- Claude Code passes **S01–S09** headless with the runner-installed canonical skill.
 - Codex passes at least **S01–S06 and S08** (harness differences noted in `RESULTS.md`).
+- OpenCode Big Pickle is the cross-agent baseline: run S01–S10 repeatedly with `--pure --auto`, and
+  record both pass rate and step count rather than treating one successful episode as stability.

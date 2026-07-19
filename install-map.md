@@ -18,16 +18,21 @@ Legend: **✓ verified** = confirmed on this machine or in the agent's own curre
 | agent | user / global path | project path | status | source |
 |-------|--------------------|--------------|--------|--------|
 | **Claude Code** | `~/.claude/skills/pairmux/` | `.claude/skills/pairmux/` | ✓ verified (this machine: `~/.claude/skills/` exists and loads skills) | authoritative for this repo |
-| **Codex CLI** | `~/.codex/skills/pairmux/` | `.codex/skills/pairmux/` | ✓ verified (this machine: `~/.codex/skills/` exists with an installed skill) | [developers.openai.com/codex/skills](https://developers.openai.com/codex/skills) |
+| **Codex CLI** | `~/.agents/skills/pairmux/` | `.agents/skills/pairmux/` | ✓ verified (Codex 0.144.6 local discovery probe + docs) | [developers.openai.com/codex/skills](https://developers.openai.com/codex/skills) |
 | **Gemini CLI** | `~/.gemini/skills/pairmux/` (alias `~/.agents/skills/pairmux/`) | `.gemini/skills/pairmux/` (alias `.agents/skills/`) | ✓ verified (docs) | [github.com/google-gemini/gemini-cli · docs/cli/skills.md](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/skills.md) |
 | **OpenCode** | `~/.config/opencode/skills/pairmux/` (also reads `~/.claude/skills/`, `~/.agents/skills/`) | `.opencode/skills/pairmux/` | ✓ verified (docs) | [opencode.ai/docs/skills](https://opencode.ai/docs/skills/) |
 | **Cursor** | `~/.cursor/skills/pairmux/` (~ best-known; some builds are project-only) | `.cursor/skills/pairmux/` | ✓ verified project path (docs) | [cursor.com/docs/skills](https://cursor.com/docs/skills) |
-| **Universal alias** | `~/.agents/skills/pairmux/` | `.agents/skills/pairmux/` | ✓ read by Gemini, OpenCode, and `npx skills` | multiple (above) |
+| **GitHub Copilot CLI** | `~/.copilot/skills/pairmux/` (also reads `~/.agents/skills/`) | `.github/skills/pairmux/` | ✓ verified (docs) | [docs.github.com · Adding agent skills](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-skills) |
+| **Windsurf Cascade** | `~/.codeium/windsurf/skills/pairmux/` (also reads `~/.agents/skills/`) | `.windsurf/skills/pairmux/` | ✓ verified (docs) | [docs.windsurf.com · Cascade Skills](https://docs.windsurf.com/windsurf/cascade/skills) |
+| **Kiro** | `~/.kiro/skills/pairmux/` | `.kiro/skills/pairmux/` | ✓ verified (docs) | [kiro.dev · Agent Skills](https://kiro.dev/docs/skills/) |
+| **Amp** | `~/.config/amp/skills/pairmux/` (also reads `~/.agents/skills/`) | `.agents/skills/pairmux/` | ✓ verified (docs) | [ampcode.com · Owner's Manual](https://ampcode.com/manual#agent-skills) |
+| **Universal alias** | `~/.agents/skills/pairmux/` | `.agents/skills/pairmux/` | ✓ read by Gemini, OpenCode, Copilot, Windsurf, and Amp | multiple (above) |
 | **Anything else** | — | — | AGENTS.md fallback (below) | — |
 
 Notes:
-- The `~/.agents/skills/` (and project `.agents/skills/`) location is a **cross-agent alias** honored
-  by several agents. Installing there is the highest-leverage single target.
+- The `~/.agents/skills/` (and project `.agents/skills/`) location is Codex's canonical path and a
+  **cross-agent alias** honored by several other agents. The `agents` target is therefore compatible
+  with Codex; do not depend on the legacy `.codex/skills/` path.
 - Skill discovery is one directory deep: an agent finds `<dir>/pairmux/SKILL.md`, not a bare
   `<dir>/SKILL.md`. Keep the `pairmux/` folder.
 - The skill `name:` frontmatter is `pairmux`, matching the folder name (required by OpenCode/Cursor).
@@ -40,11 +45,19 @@ The pairmux binary embeds a synced copy of this skill and installs it into the r
 
 ```bash
 pairmux skill install --target claude-code          # one agent
+pairmux skill install --target copilot              # Copilot CLI / agent mode
+pairmux skill install --target windsurf             # Windsurf Cascade
+pairmux skill install --target kiro                  # Kiro IDE / CLI
+pairmux skill install --target amp                   # Amp
+pairmux skill install --target agents                # universal ~/.agents/skills alias
 pairmux skill install --target all                  # every agent it can find
 pairmux skill install --target codex --dry-run      # print the paths it would write, do nothing
 ```
-For a target with no native skills directory, it prints the AGENTS.md fallback instructions instead of
-copying. (The embedded copy is synced from this repo's `skills/pairmux/` at release time.)
+Valid targets are `claude-code`, `codex`, `gemini`, `cursor`, `opencode`, `copilot`, `windsurf`,
+`kiro`, `amp`, `agents`, and `all`. `cursor` installs project-relative to `.cursor/skills/pairmux/`;
+the other named targets above install to their user/global paths in the table.
+`all` installs only where the agent's configuration directory already exists, and reports skipped
+targets. The embedded copy is synced from this repo's `skills/pairmux/` at release time.
 
 ### Option B — `npx skills add` (community installer, Vercel Labs)
 
@@ -55,7 +68,7 @@ npx skills add treeleaves30760/pairmux-skills       # project scope, pick agents
 npx skills add treeleaves30760/pairmux-skills -g     # global (user) scope
 ```
 It resolves the repo, finds `skills/pairmux/`, and copies it into each selected agent's directory
-(`~/.claude/skills/`, `~/.codex/skills/`, `~/.agents/skills/`, `~/.cursor/skills/`,
+(`~/.claude/skills/`, `~/.agents/skills/`, `~/.cursor/skills/`,
 `~/.config/opencode/skills/`, …). Subcommands: `add`, `find`, `list`, `remove`, `update`.
 Source: [github.com/vercel-labs/skills](https://github.com/vercel-labs/skills).
 
@@ -88,7 +101,8 @@ over**, drive it with `pairmux` instead of the raw shell. For one-shot short com
 - Truncated output → `pairmux log X --grep "..."` (read the journal; don't re-run).
 - **Never** `sleep` to guess timing. **Never** type or guess a secret — on a password prompt run
   `pairmux wait X --human --notify` to hand off to a human.
-- Add `--json` for a machine-readable envelope. Its `next` field is your next command; a `notes`
-  field holds messages from a human — read and obey them.
+- Add `--json` for a machine-readable envelope. Read optional `next` hints in order: obey safety/prose,
+  replace placeholders, and run the first applicable command; never execute hint text literally.
+  Read and obey human `notes`.
 - Full reference: the `pairmux` skill (SKILL.md + references/) or run `pairmux help`.
 ```

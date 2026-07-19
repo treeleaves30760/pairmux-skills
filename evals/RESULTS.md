@@ -2,19 +2,37 @@
 
 Log every eval run here: the machine, date, agent/model version, and per-scenario pass/fail.
 
-## Format
+## Run template
 
-```
-### <date> — <agent/model> — <machine>
-tmux <ver>, pairmux <ver>
-| scenario | result | steps | notes |
-| S01 | pass | 2 | ... |
-...
-pass rate: N/10
+Copy this block for a benchmark run. Values come from generated `summary.json`; keep the run id and
+artifact location so results are auditable.
+
+```markdown
+### YYYY-MM-DD — <agent> <version> / <model> — <machine>
+
+- runner: `python3 evals/run.py --agent ... --scenario S01-S10 --repeat N ...`
+- requested provider/model: `<provider>` / `<model>` (both explicit, not agent defaults)
+- run id: `<summary.json run_id>`
+- artifacts: `<path to run directory>`
+- tmux: `<version>`; pairmux: `<version>`, `<resolved path>`, `<binary sha256>`
+- skill: `<tree sha256>`, `SKILL.md <sha256>`
+- sandbox/config: `<Codex sandbox or agent-specific notes>`
+- provenance: git `<commit>` (`dirty=false`); fixture manifest `<summary.json fixture_sha256>`
+- acceptance: profile `<profile>`; minimum repetitions `<N>`; threshold `<rate>`; eligible `<bool>`
+
+| scenario | passed / episodes | pass rate | steps | wall time | notes |
+|----------|-------------------|-----------|-------|-----------|-------|
+| S01 | N/N | 100% | N | N.Ns | ... |
+| ... | ... | ... | ... | ... | ... |
+
+overall: N/N episodes passed; N total pairmux steps; N.Ns runner wall time
 ```
 
-`result` = `check.sh` exit (pass = 0). `steps` = number of pairmux commands the agent issued
-(lower is better for the same outcome). Note any harness quirks (e.g. Codex differences).
+`pass` normally requires a successful agent exit, valid runner-owned exact-call proof, isolated
+terminal-state assertions, and `check.sh` exit 0. S05 additionally permits `expected_human_handoff`
+only for the same-terminal `wait --human --notify` still live at the runner deadline, without an
+explicit short timeout. Earlier signals and completed calls are not interruption proof. `steps` comes
+from the runner-owned execution-broker ledger, not transcript grep or agent JSON files.
 
 ---
 
@@ -62,7 +80,17 @@ Notes:
 
 ### Pending — headless acceptance runs (P4 exit criteria)
 
+These remain pending until a clean checkout run uses explicit `--provider`, `--model`, and
+`--acceptance-profile p4`, and `summary.json.acceptance.eligible` is true. The profile requires a
+100% threshold, at least one repetition for each required Claude/Codex scenario, and at least three
+repetitions across S01-S10 for OpenCode. An ineligible P4 run exits nonzero even when every selected
+episode passed, so partial runs cannot be mistaken for acceptance.
+
 Run with the harness in [README.md](README.md), record here:
 
-- [ ] Claude Code (`claude -p`) passes S01–S09 headless, skill installed at `~/.claude/skills/pairmux/`.
+- [ ] Claude Code (`claude -p`) passes S01–S09 headless with the runner's isolated, hash-verified skill copy.
 - [ ] Codex (`codex exec`) passes at least S01–S06 and S08; note harness differences.
+- [ ] OpenCode Big Pickle repeatedly passes S01–S10 with `--pure --auto`; record pass rate and steps.
+
+Big Pickle acceptance is still pending. A one-off S01 smoke/canary, even if successful, does not
+establish the required repeated S01–S10 pass rate or step-count baseline.
