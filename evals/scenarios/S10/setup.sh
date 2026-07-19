@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # S10 — note relay: a human left an instruction as a note; the agent must read it and act on it.
 set -euo pipefail
-SCEN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCEN_DIR="${PAIRMUX_EVAL_SCENARIO_DIR:-$SCRIPT_DIR}"
 # shellcheck source=SCRIPTDIR/../../lib.sh
-. "$SCEN_DIR/../../lib.sh"
+. "$SCRIPT_DIR/../../lib.sh"
 pmx_setup "$SCEN_DIR" s10
 rm -f "$SCEN_DIR/token.txt"
 

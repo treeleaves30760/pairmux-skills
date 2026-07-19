@@ -5,12 +5,17 @@ evals/scenarios/*/env.sh
 evals/scenarios/*/check.out
 
 # Generated eval materials and agent transcripts.
+evals/runs/
 evals/scenarios/*/transcript*.txt
 evals/scenarios/*/transcript*.jsonl
 evals/scenarios/*/bad-transcript.txt
 evals/scenarios/S03/haystack.log
 evals/scenarios/S08/port.txt
 evals/scenarios/S10/token.txt
+
+# Python test/runtime caches.
+__pycache__/
+*.py[cod]
 
 # OS / editor cruft
 .DS_Store

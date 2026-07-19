@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  eval-harness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Compile Python sources
+        run: python3 -m py_compile evals/run.py evals/pairmux_proxy.py evals/tests/mock_bin.py
+      - name: Run model-free harness tests
+        run: python3 -m unittest discover -s evals/tests -v
+      - name: Validate scenario shell
+        run: bash -n evals/lib.sh evals/scenarios/*/setup.sh evals/scenarios/*/check.sh
+      - name: Lint scenario shell
+        run: shellcheck evals/lib.sh evals/scenarios/*/setup.sh evals/scenarios/*/check.sh
+
+  commit-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      - name: Self-test commit subject validator
+        run: ./scripts/validate-commit-subjects.sh --self-test
+      - name: Validate new commit subjects
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            ./scripts/validate-commit-subjects.sh --branch "$PR_HEAD_REF"
+            ./scripts/validate-commit-subjects.sh --range "$BASE_SHA" "$PR_HEAD_SHA"
+          elif [ -n "$BEFORE_SHA" ] &&
+               [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
+            ./scripts/validate-commit-subjects.sh --range "$BEFORE_SHA" "$HEAD_SHA"
+          else
+            ./scripts/validate-commit-subjects.sh --commit "$HEAD_SHA"
+          fi

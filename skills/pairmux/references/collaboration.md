@@ -29,6 +29,9 @@ pairmux wait dbmigrate --human --notify
 ```
 `wait --human` blocks until a human leaves a note; `--notify` pops a desktop notification
 (`osascript` on macOS, `notify-send` on Linux — best-effort). Your tool call is now parked.
+If the shell/tool client interrupts before pairmux returns, immediately reissue the same
+`wait --human --notify`; never type the secret or shorten the 300-second default wait. An explicit
+handoff timeout must be a single valid Go duration of at least `300s`.
 
 **3. The human takes over the same pane, types the secret, and leaves a note:**
 ```bash
@@ -63,8 +66,8 @@ every `peek`/`run`/`wait` (it is not consumed by reading), so you won't miss it.
 ## Waiting for the human, not fighting them
 
 While a human is typing in a pane, don't fight them for it. The discipline: **if a human has attached,
-`wait` (don't `run`) until they leave a note.** Attach and note events are recorded in the journal, so
-your next reply reflects that a human was involved.
+`wait` (don't `run`) until they leave a note.** Notes are recorded in the journal and surface in the
+next reply; attaching itself is deliberately just a live tmux operation and does not create an event.
 
 `wait --human` also returns immediately if a note is *already* waiting and unseen — so the natural
 "human notes, then the agent waits" ordering never drops a message.
