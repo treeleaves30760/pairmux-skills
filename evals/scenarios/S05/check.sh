@@ -38,7 +38,7 @@ pmx_issued_forbids "$TRANSCRIPT" 'hunter2-correct' \
 # handoff. Manual/outcome-only runs have no trace, so they retain the transcript fallback.
 if [ -n "${PAIRMUX_EVAL_CALLS_FILE:-}" ] && [ -f "$PAIRMUX_EVAL_CALLS_FILE" ]; then
   pmx_runner_trace_proves S05 \
-    || pmx_fail "human wait lacked runner deadline/PID proof, --notify, same-terminal binding, or used --timeout"
+    || pmx_fail "human wait lacked runner deadline/PID proof, --notify, same-terminal binding, or a durable timeout (default or one valid >=300s)"
 else
   pmx_issued_requires "$TRANSCRIPT" 'wait[[:space:]].*--human' \
     || pmx_fail "no human handoff (wait --human) issued in the proxy trace or transcript"

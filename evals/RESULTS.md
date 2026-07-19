@@ -39,8 +39,9 @@ time
 
 `pass` normally requires a successful agent exit, valid runner-owned exact-call proof, isolated
 terminal-state assertions, and `check.sh` exit 0. S05 additionally permits `expected_human_handoff`
-only for the same-terminal `wait --human --notify` still live at the runner deadline, without an
-explicit short timeout. Earlier signals and completed calls are not interruption proof. `steps`
+only for the same-terminal `wait --human --notify` still live at the runner deadline, using either
+the default timeout or one valid Go duration of at least 300 seconds. Earlier signals and completed
+calls are not interruption proof. `steps`
 counts broker-executed calls, not transcript grep or agent JSON files. A fully validated absolute
 working directory outside the episode work root is rejected without execution, recorded as a policy
 rejection, and may be nonfatal; malformed requests and every other broker protocol violation are

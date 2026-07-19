@@ -43,6 +43,24 @@ BROKER_MAX_FRAME_BYTES = 32 * 1024
 EARLY_FAILURE_TAIL_BYTES = 64 * 1024
 OPENCODE_AUTH_MAX_BYTES = 1024 * 1024
 OPENCODE_AUTH_ENV_BY_PROVIDER = {"huggingface": "HF_TOKEN"}
+MAX_GO_DURATION_NANOSECONDS = 1 << 63
+MIN_DURABLE_HUMAN_WAIT_NANOSECONDS = 300_000_000_000
+GO_DURATION_COMPONENT = re.compile(
+    r"(?P<integer>[0-9]*)(?:\.(?P<fraction>[0-9]*))?"
+    r"(?P<unit>ns|us|\u00b5s|\u03bcs|ms|s|m|h)"
+)
+GO_DURATION_UNIT_NANOSECONDS = {
+    "ns": 1,
+    "us": 1_000,
+    "\u00b5s": 1_000,
+    "\u03bcs": 1_000,
+    "ms": 1_000_000,
+    "s": 1_000_000_000,
+    "m": 60_000_000_000,
+    "h": 3_600_000_000_000,
+}
+WAIT_BOOLEAN_FLAGS = frozenset({"human", "notify"})
+WAIT_VALUE_FLAGS = frozenset({"idle", "pattern", "timeout"})
 RUN_FATAL_FAILURE_CLASSES = frozenset(
     {
         "control_cleanup_failed",
@@ -1667,6 +1685,135 @@ def argument_value(arguments: list[str], name: str) -> str | None:
     return None
 
 
+def parse_go_uint(value: str) -> int | None:
+    parsed = 0
+    for character in value:
+        digit = ord(character) - ord("0")
+        if parsed > MAX_GO_DURATION_NANOSECONDS // 10:
+            return None
+        parsed = parsed * 10 + digit
+        if parsed > MAX_GO_DURATION_NANOSECONDS:
+            return None
+    return parsed
+
+
+def parse_go_fraction(value: str) -> tuple[int, float]:
+    parsed = 0
+    scale = 1.0
+    overflow = False
+    for character in value:
+        if overflow:
+            continue
+        digit = ord(character) - ord("0")
+        if parsed > (MAX_GO_DURATION_NANOSECONDS - 1) // 10:
+            overflow = True
+            continue
+        candidate = parsed * 10 + digit
+        if candidate > MAX_GO_DURATION_NANOSECONDS:
+            overflow = True
+            continue
+        parsed = candidate
+        scale *= 10
+    return parsed, scale
+
+
+def parse_go_duration_nanoseconds(value: str) -> int | None:
+    negative = False
+    remaining = value
+    if remaining.startswith(("+", "-")):
+        negative = remaining[0] == "-"
+        remaining = remaining[1:]
+    if remaining == "0":
+        return 0
+    if not remaining:
+        return None
+
+    total = 0
+    position = 0
+    while position < len(remaining):
+        match = GO_DURATION_COMPONENT.match(remaining, position)
+        if match is None:
+            return None
+        integer_text = match.group("integer")
+        fraction_text = match.group("fraction")
+        if not integer_text and not fraction_text:
+            return None
+        integer = parse_go_uint(integer_text)
+        if integer is None:
+            return None
+        unit = GO_DURATION_UNIT_NANOSECONDS[match.group("unit")]
+        if integer > MAX_GO_DURATION_NANOSECONDS // unit:
+            return None
+        component = integer * unit
+        if fraction_text:
+            fraction, scale = parse_go_fraction(fraction_text)
+            component += int(float(fraction) * (float(unit) / scale))
+            if component > MAX_GO_DURATION_NANOSECONDS:
+                return None
+        total += component
+        if total > MAX_GO_DURATION_NANOSECONDS:
+            return None
+        position = match.end()
+    if negative:
+        return -total
+    if total > MAX_GO_DURATION_NANOSECONDS - 1:
+        return None
+    return total
+
+
+def parse_wait_arguments(
+    arguments: list[str],
+) -> tuple[str, set[str], list[str]] | None:
+    positionals: list[str] = []
+    seen: set[str] = set()
+    timeout_values: list[str] = []
+    index = 0
+    while index < len(arguments):
+        value = arguments[index]
+        if value == "--":
+            positionals.extend(arguments[index + 1 :])
+            break
+        if len(value) > 1 and value.startswith("-"):
+            flag = value.lstrip("-")
+            name, separator, inline_value = flag.partition("=")
+            if name in WAIT_BOOLEAN_FLAGS:
+                seen.add(name)
+            elif name in WAIT_VALUE_FLAGS:
+                if not separator:
+                    index += 1
+                    if index >= len(arguments):
+                        return None
+                    inline_value = arguments[index]
+                seen.add(name)
+                if name == "timeout":
+                    timeout_values.append(inline_value)
+            else:
+                return None
+        else:
+            positionals.append(value)
+        index += 1
+    if len(positionals) != 1:
+        return None
+    return positionals[0], seen, timeout_values
+
+
+def durable_human_wait_terminal(arguments: list[str]) -> str | None:
+    parsed = parse_wait_arguments(arguments)
+    if parsed is None:
+        return None
+    terminal, seen, timeout_values = parsed
+    if not {"human", "notify"}.issubset(seen):
+        return None
+    if not timeout_values:
+        return terminal
+    if len(timeout_values) != 1:
+        return None
+    duration = parse_go_duration_nanoseconds(timeout_values[0])
+    if duration is None or duration < MIN_DURABLE_HUMAN_WAIT_NANOSECONDS:
+        return None
+    return terminal
+
+
 def positional_arguments(arguments: list[str], value_flags: set[str]) -> list[str]:
     positional: list[str] = []
     index = 0
@@ -1704,9 +1851,7 @@ def calls_have_human_wait(
         subcommand, arguments = command
         if (
             subcommand == "wait"
-            and "--human" in arguments
-            and "--notify" in arguments
-            and argument_value(arguments, "--timeout") is None
+            and durable_human_wait_terminal(arguments) is not None
             and (not require_interrupted or call_was_interrupted(call))
         ):
             return True
@@ -1728,15 +1873,10 @@ def s05_handoff_call(calls: list[dict[str, object]]) -> dict[str, object] | None
             and any("secret.sh" in value for value in arguments)
         ):
             prompt_terminals.add(terminal)
-        if (
-            subcommand == "wait"
-            and terminal in prompt_terminals
-            and "--human" in arguments
-            and "--notify" in arguments
-            and argument_value(arguments, "--timeout") is None
-            and call_was_interrupted(call)
-        ):
-            return call
+        if subcommand == "wait":
+            wait_terminal = durable_human_wait_terminal(arguments)
+            if wait_terminal in prompt_terminals and call_was_interrupted(call):
+                return call
     return None
 
 

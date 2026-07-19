@@ -842,8 +842,81 @@ class RunnerTests(unittest.TestCase):
             "runner_timeout_client_ancestry_match": True,
         }
         self.assertTrue(eval_run.calls_have_human_wait([proof], require_interrupted=True))
+        durable_timeouts = (
+            ("--timeout=300s",),
+            ("-timeout", "5m"),
+            ("---timeout=600s",),
+            ("--timeout", "4m60s"),
+            ("--timeout", "2562047h47m16.854775807s"),
+        )
+        for timeout_arguments in durable_timeouts:
+            with self.subTest(durable_timeout=timeout_arguments):
+                durable = dict(proof)
+                durable["argv"] = [
+                    "wait",
+                    "t1",
+                    "--human",
+                    "--notify",
+                    *timeout_arguments,
+                ]
+                self.assertTrue(
+                    eval_run.calls_have_human_wait([durable], require_interrupted=True)
+                )
+        rejected_timeouts = (
+            ("--timeout", "299s"),
+            ("-timeout", "299s"),
+            ("---timeout=299s",),
+            ("--timeout", "4m59s"),
+            ("--timeout", "30s"),
+            ("--timeout", "invalid"),
+            ("--timeout", "300"),
+            ("--timeout", "\u0663\u0660\u0660s"),
+            ("--timeout", "2562047h47m16.854775808s"),
+            ("--timeout", "299.9999999999s.0000000001s"),
+            ("--timeout",),
+            ("--timeout", "600s", "-timeout", "600s"),
+        )
+        for timeout_arguments in rejected_timeouts:
+            with self.subTest(short_or_invalid_timeout=timeout_arguments):
+                short = dict(proof)
+                short["argv"] = [
+                    "wait",
+                    "t1",
+                    "--human",
+                    "--notify",
+                    *timeout_arguments,
+                ]
+                self.assertFalse(
+                    eval_run.calls_have_human_wait([short], require_interrupted=True)
+                )
 
-    def test_s05_proof_rejects_early_signal_wrong_terminal_missing_notify_and_timeout(self) -> None:
+    def test_s05_accepts_durable_retry_after_client_disconnect(self) -> None:
+        run_secret = {"argv": ["run", "secret", "./secret.sh"], "exit_code": 0}
+        disconnected = {
+            "argv": ["wait", "secret", "--human", "--notify"],
+            "cancel_reason": "client-disconnected",
+            "client_connected_at_finish": False,
+            "exit_code": -15,
+        }
+        durable_retry = {
+            "argv": [
+                "wait",
+                "secret",
+                "--human",
+                "--notify",
+                "--timeout",
+                "600s",
+            ],
+            "runner_timeout_interrupted": True,
+            "runner_timeout_pid_live": True,
+            "runner_timeout_client_live": True,
+            "runner_timeout_client_ancestry_match": True,
+        }
+        calls = [run_secret, disconnected, durable_retry]
+        self.assertIs(eval_run.s05_handoff_call(calls), durable_retry)
+        self.assertTrue(eval_run.calls_have_human_wait(calls, require_interrupted=True))
+
+    def test_s05_proof_rejects_early_signal_wrong_terminal_missing_notify_and_short_timeout(self) -> None:
         run_secret = {"argv": ["run", "secret", "./secret.sh"], "exit_code": 0}
         counterexamples = [
             {
@@ -867,6 +940,13 @@ class RunnerTests(unittest.TestCase):
             },
             {
                 "argv": ["wait", "secret", "--human", "--notify", "--timeout", "30s"],
+                "runner_timeout_interrupted": True,
+                "runner_timeout_pid_live": True,
+                "runner_timeout_client_live": True,
+                "runner_timeout_client_ancestry_match": True,
+            },
+            {
+                "argv": ["wait", "secret", "--human", "--notify", "--timeout", "invalid"],
                 "runner_timeout_interrupted": True,
                 "runner_timeout_pid_live": True,
                 "runner_timeout_client_live": True,
@@ -986,6 +1066,7 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("`kill` destroys the terminal", skill)
         self.assertIn("Pattern waits observe future output only", skill)
         self.assertIn("use `peek`/`log --grep`; never wait for a past line", skill)
+        self.assertIn("one valid explicit timeout of at least 300s", skill)
 
     def test_sourcing_generated_env_preserves_broker_proxy(self) -> None:
         env = self.env.copy()
