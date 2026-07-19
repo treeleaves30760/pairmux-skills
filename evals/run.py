@@ -1519,7 +1519,18 @@ def validate_scenario_calls(scenario: str, calls: list[dict[str, object]]) -> li
     def program_launches(needle: str) -> list[tuple[int, str, str]]:
         launches: list[tuple[int, str, str]] = []
         for index, call, name, arguments in decoded:
-            if call.get("exit_code") != 0:
+            exit_signal = call.get("exit_signal")
+            received_signals = call.get("received_signals")
+            interrupted_client = (
+                call.get("cancel_reason") == "client-disconnected"
+                and call.get("client_connected_at_finish") is False
+                and isinstance(exit_signal, int)
+                and exit_signal in {signal.SIGTERM, signal.SIGKILL}
+                and call.get("exit_code") == -exit_signal
+                and isinstance(received_signals, list)
+                and exit_signal in received_signals
+            )
+            if call.get("exit_code") != 0 and not interrupted_client:
                 continue
             terminal: str | None = None
             program = ""

@@ -578,6 +578,26 @@ class RunnerTests(unittest.TestCase):
         ]
         self.assertEqual(eval_run.validate_scenario_calls("S08", server_calls), [])
 
+        disconnected_server_calls = [
+            {
+                "argv": ["run", "server", "./server.sh"],
+                "exit_code": -15,
+                "exit_signal": 15,
+                "received_signals": [15],
+                "cancel_reason": "client-disconnected",
+                "client_connected_at_finish": False,
+            },
+            {"argv": ["run", "client", "./hit.sh"], "exit_code": 0},
+            {"argv": ["peek", "server"], "exit_code": 0},
+        ]
+        self.assertEqual(
+            eval_run.validate_scenario_calls("S08", disconnected_server_calls), []
+        )
+        disconnected_server_calls[0]["cancel_reason"] = "broker-finalize"
+        self.assertTrue(
+            eval_run.validate_scenario_calls("S08", disconnected_server_calls)
+        )
+
     def test_s08_accepts_status_filter_but_rejects_unrelated_log_filter(self) -> None:
         calls = [
             {"argv": ["new", "--name", "server"], "exit_code": 0},

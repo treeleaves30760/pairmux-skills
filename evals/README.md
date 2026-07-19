@@ -144,6 +144,12 @@ pairmux calls; safely denied cwd requests are reported separately in each episod
 total. This is a fail-closed evidence boundary for cooperative benchmark agents, not hostile
 same-UID isolation; a hostile process still requires a separate UID, container, or VM.
 
+For a long-lived program, an agent shell tool can disconnect while the real `pairmux run` client is
+still blocking even though the tmux program is live. Launch validators recognize that case only when
+the broker recorded `client-disconnected`, a closed client, and its own matching SIGTERM/SIGKILL
+result. The scenario must still prove the later terminal-specific outcome and readback. Ordinary
+nonzero exits, missing runner fields, and broker-finalize cancellation remain failed launches.
+
 Run directories are collision-resistant across simultaneous runners and reruns:
 
 ```bash
