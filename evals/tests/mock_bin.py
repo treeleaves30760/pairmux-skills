@@ -183,6 +183,50 @@ def run_agent(program: str, args: list[str]) -> int:
         )
 
     mode = os.environ.get("PAIRMUX_MOCK_MODE", "pass")
+    if mode in {"provider_rate_limited", "provider_rate_limited_exit"}:
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        append_json(os.environ.get("PAIRMUX_MOCK_CHILD_LOG"), {"pid": child.pid})
+        sys.stderr.write("x" * (70 * 1024) + "\n")
+        sys.stderr.write(
+            'timestamp=2026-07-19T00:00:00Z level=ERROR message="stream error" '
+            'error.error="AI_APICall'
+        )
+        sys.stderr.flush()
+        time.sleep(0.05)
+        sys.stderr.write('Error: Rate limit exceeded. Please try again later."\n')
+        sys.stderr.flush()
+        if mode == "provider_rate_limited_exit":
+            return 75
+        time.sleep(60)
+        return 0
+    provider_failures = {
+        "provider_auth_failed": "ProviderAuthError: invalid credential",
+        "provider_unavailable": (
+            "AI_RetryError: Failed after 3 attempts. Last error: Service Unavailable"
+        ),
+    }
+    if mode in provider_failures:
+        sys.stderr.write(
+            'timestamp=2026-07-19T00:00:00Z level=ERROR message="stream error" '
+            f'error.error="{provider_failures[mode]}"\n'
+        )
+        sys.stderr.flush()
+        time.sleep(60)
+        return 0
+    if mode == "provider_error_text_stdout":
+        print(
+            json.dumps(
+                {
+                    "type": "text",
+                    "part": {
+                        "text": (
+                            'level=ERROR message="stream error" '
+                            'error.error="AI_APICallError: Rate limit exceeded."'
+                        )
+                    },
+                }
+            )
+        )
     if mode == "hang":
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
         append_json(os.environ.get("PAIRMUX_MOCK_CHILD_LOG"), {"pid": child.pid})

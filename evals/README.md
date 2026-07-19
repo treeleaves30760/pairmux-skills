@@ -85,7 +85,7 @@ The adapters deliberately use stable, non-interactive output modes:
 
 | agent | runner invocation details |
 |---|---|
-| OpenCode | `--pure --auto run --format json --dir <isolated-scenario>` |
+| OpenCode | `--pure --auto --print-logs --log-level ERROR run --format json --dir <isolated-scenario>` |
 | Claude Code | `-p --allowedTools Bash --setting-sources project --strict-mcp-config --output-format stream-json` |
 | Codex | `exec --sandbox <mode> --ephemeral --json`; default sandbox is `danger-full-access` |
 
@@ -101,6 +101,13 @@ runner-created mode-0700 `/tmp` directory with a `tempfile`-generated safe name,
 user-selected output path that Bash could expand through `BASH_ENV`. The agent process starts in a
 new session; a wall-clock timeout terminates and then kills that entire process group. The runner
 itself does not use pairmux to supervise the agent under test.
+
+OpenCode ERROR diagnostics are tailed incrementally from the regular-file stderr artifact. A strict
+machine-log signature for provider authentication failure, exhausted rate limits, or a service error
+after retries terminates the agent process group immediately and stops scheduling later episodes.
+`summary.json.schedule` records planned, completed, and skipped episodes plus the normalized stop
+reason. The partial run still fails, and P4 remains ineligible because required repetitions are
+missing. Assistant text and transcript stdout never participate in provider-failure detection.
 
 ### Isolation and instrumentation
 

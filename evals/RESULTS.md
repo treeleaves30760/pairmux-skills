@@ -23,6 +23,7 @@ claim can be reproduced and audited.
   `<result.json agent_project_isolation.method>`
 - provenance: git `<commit>` to `<end_commit>` (`dirty=false`, `end_dirty=false`, `stable=true`)
 - fixtures: `summary.json.fixture_sha256` (per-scenario file/hash map)
+- schedule: `<completed>/<planned>` episodes; `<skipped>` skipped; stop reason `<reason or null>`
 - acceptance: profile `<profile>`; minimum repetitions `<N>`; threshold `<rate>`; eligible `<bool>`
 
 | scenario | passed / episodes | pass rate | steps | policy rejections | wall time | notes |
@@ -41,7 +42,9 @@ explicit short timeout. Earlier signals and completed calls are not interruption
 counts broker-executed calls, not transcript grep or agent JSON files. A fully validated absolute
 working directory outside the episode work root is rejected without execution, recorded as a policy
 rejection, and may be nonfatal; malformed requests and every other broker protocol violation are
-fatal.
+fatal. A normalized provider authentication, rate-limit, or post-retry service failure stops the
+remaining schedule and leaves P4 ineligible; raw provider error text is not copied into result or
+summary fields.
 
 ---
 

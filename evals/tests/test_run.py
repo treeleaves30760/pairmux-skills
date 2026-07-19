@@ -306,6 +306,8 @@ class RunnerTests(unittest.TestCase):
                 if agent == "opencode":
                     self.assertIn("--pure", argv)
                     self.assertIn("--auto", argv)
+                    self.assertIn("--print-logs", argv)
+                    self.assertEqual(argv[argv.index("--log-level") + 1], "ERROR")
                     self.assertEqual(argv[argv.index("--format") + 1], "json")
                     scenario_dir = run_root / result["paths"]["episode"] / "work/S01"
                     self.assertEqual(
@@ -412,6 +414,175 @@ class RunnerTests(unittest.TestCase):
         self.assertFalse(result["pass"])
         self.assertTrue((run_root / result["paths"]["check_stdout"]).is_file())
         self.assertTrue((run_root / result["paths"]["check_stderr"]).is_file())
+
+    def test_provider_rate_limit_fails_fast_and_stops_remaining_episodes(self) -> None:
+        env = self.env.copy()
+        env["PAIRMUX_MOCK_MODE"] = "provider_rate_limited"
+        env["PAIRMUX_MOCK_CHILD_LOG"] = str(self.root / "provider-child.jsonl")
+        completed = self.invoke(
+            "--agent",
+            "opencode",
+            "--provider",
+            "opencode",
+            "--model",
+            "opencode/big-pickle",
+            "--acceptance-profile",
+            "p4",
+            "--scenario",
+            "S01-S02",
+            "--repeat",
+            "2",
+            "--timeout",
+            "5",
+            "--output-dir",
+            str(self.root / "provider-rate-limit-runs"),
+            env=env,
+        )
+        self.assertEqual(completed.returncode, 1)
+        run_root, result = self.result_for(completed)
+        self.assertEqual(result["failure_class"], "provider_rate_limited")
+        self.assertEqual(result["agent_observed_failure_class"], "provider_rate_limited")
+        self.assertFalse(result["timed_out"])
+        self.assertLess(float(result["wall_time_seconds"]), 4.0)
+        self.assertIn("STOP schedule", completed.stderr)
+        self.assertEqual(len((run_root / "results.jsonl").read_text().splitlines()), 1)
+
+        summary_text = (run_root / "summary.json").read_text(encoding="utf-8")
+        summary = json.loads(summary_text)
+        self.assertEqual(summary["stop_reason"], "provider_rate_limited")
+        self.assertEqual(
+            summary["schedule"],
+            {
+                "planned_episodes": 4,
+                "completed_episodes": 1,
+                "skipped_episodes": 3,
+                "stopped_early": True,
+                "stop_reason": "provider_rate_limited",
+            },
+        )
+        self.assertFalse(summary["acceptance"]["eligible"])
+        self.assertNotIn("Rate limit exceeded", summary_text)
+        self.assertIn(
+            "AI_APICallError: Rate limit exceeded",
+            (run_root / result["paths"]["episode"] / "agent.stderr.log").read_text(
+                encoding="utf-8"
+            ),
+        )
+
+        child = json.loads(
+            (self.root / "provider-child.jsonl").read_text(encoding="utf-8").splitlines()[0]
+        )
+        with self.assertRaises(ProcessLookupError):
+            os.kill(int(child["pid"]), 0)
+
+    def test_provider_rate_limit_is_classified_when_agent_exits_immediately(self) -> None:
+        env = self.env.copy()
+        env["PAIRMUX_MOCK_MODE"] = "provider_rate_limited_exit"
+        completed = self.invoke(
+            "--agent",
+            "opencode",
+            "--scenario",
+            "S01",
+            "--timeout",
+            "5",
+            "--output-dir",
+            str(self.root / "provider-rate-limit-exit-runs"),
+            env=env,
+        )
+        self.assertEqual(completed.returncode, 1)
+        run_root, result = self.result_for(completed)
+        self.assertEqual(result["failure_class"], "provider_rate_limited")
+        self.assertFalse(result["timed_out"])
+        summary = json.loads((run_root / "summary.json").read_text(encoding="utf-8"))
+        self.assertFalse(summary["schedule"]["stopped_early"])
+        self.assertEqual(summary["schedule"]["skipped_episodes"], 0)
+        self.assertEqual(summary["stop_reason"], "provider_rate_limited")
+
+    def test_other_provider_failures_are_classified_and_stop_schedule(self) -> None:
+        for mode in ("provider_auth_failed", "provider_unavailable"):
+            with self.subTest(mode=mode):
+                env = self.env.copy()
+                env["PAIRMUX_MOCK_MODE"] = mode
+                completed = self.invoke(
+                    "--agent",
+                    "opencode",
+                    "--scenario",
+                    "S01-S02",
+                    "--timeout",
+                    "5",
+                    "--output-dir",
+                    str(self.root / f"{mode}-runs"),
+                    env=env,
+                )
+                self.assertEqual(completed.returncode, 1)
+                run_root, result = self.result_for(completed)
+                self.assertEqual(result["failure_class"], mode)
+                self.assertFalse(result["timed_out"])
+                summary = json.loads(
+                    (run_root / "summary.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(summary["stop_reason"], mode)
+                self.assertEqual(summary["schedule"]["completed_episodes"], 1)
+                self.assertEqual(summary["schedule"]["skipped_episodes"], 1)
+
+    def test_opencode_silent_hang_remains_agent_timeout(self) -> None:
+        env = self.env.copy()
+        env["PAIRMUX_MOCK_MODE"] = "hang"
+        completed = self.invoke(
+            "--agent",
+            "opencode",
+            "--scenario",
+            "S01",
+            "--timeout",
+            "0.5",
+            "--output-dir",
+            str(self.root / "opencode-timeout-runs"),
+            env=env,
+        )
+        self.assertEqual(completed.returncode, 1)
+        _run_root, result = self.result_for(completed)
+        self.assertEqual(result["failure_class"], "agent_timeout")
+        self.assertTrue(result["timed_out"])
+        self.assertIsNone(result["agent_observed_failure_class"])
+
+    def test_provider_error_text_on_stdout_does_not_trigger_detector(self) -> None:
+        env = self.env.copy()
+        env["PAIRMUX_MOCK_MODE"] = "provider_error_text_stdout"
+        completed = self.invoke(
+            "--agent",
+            "opencode",
+            "--scenario",
+            "S01",
+            "--timeout",
+            "5",
+            "--output-dir",
+            str(self.root / "provider-error-stdout-runs"),
+            env=env,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        _run_root, result = self.result_for(completed)
+        self.assertTrue(result["pass"])
+        self.assertIsNone(result["agent_observed_failure_class"])
+
+    def test_provider_rate_limit_cannot_be_misclassified_as_handoff(self) -> None:
+        env = self.env.copy()
+        env["PAIRMUX_MOCK_MODE"] = "provider_rate_limited"
+        completed = self.invoke(
+            "--agent",
+            "opencode",
+            "--scenario",
+            "S05",
+            "--timeout",
+            "5",
+            "--output-dir",
+            str(self.root / "provider-rate-limit-handoff-runs"),
+            env=env,
+        )
+        self.assertEqual(completed.returncode, 1)
+        _run_root, result = self.result_for(completed)
+        self.assertFalse(result["pass"])
+        self.assertEqual(result["outcome"], "failed")
+        self.assertEqual(result["failure_class"], "provider_rate_limited")
 
     def test_timeout_preserves_interrupted_proxy_call_record(self) -> None:
         env = self.env.copy()
@@ -1194,6 +1365,24 @@ class RunnerTests(unittest.TestCase):
                     git=git,
                 )
                 self.assertFalse(rejected["eligible"])
+
+    def test_acceptance_rejects_contradictory_provider_failure(self) -> None:
+        results = [
+            {"scenario": f"S{number:02d}", "pass": True, "failure_class": None}
+            for number in range(1, 11)
+            for _repeat in range(3)
+        ]
+        results[0]["failure_class"] = "provider_rate_limited"
+        rejected = eval_run.acceptance_status(
+            profile="p4",
+            agent="opencode",
+            provider_verified=True,
+            model_verified=True,
+            results=results,
+            git={"commit": "a" * 40, "dirty": False, "stable": True},
+        )
+        self.assertFalse(rejected["eligible"])
+        self.assertIn("S01 pass rate", " ".join(rejected["reasons"]))
 
     def test_check_helpers_find_custom_socket_hashed_state(self) -> None:
         state = self.root / "state"

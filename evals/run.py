@@ -39,6 +39,10 @@ BROKER_REQUEST_SCHEMA = "pairmux.eval.exec.v1"
 BROKER_RESPONSE_SCHEMA = "pairmux.eval.exec-result.v1"
 BROKER_REJECTION_SCHEMA = "pairmux.eval.rejection.v1"
 BROKER_MAX_FRAME_BYTES = 32 * 1024
+EARLY_FAILURE_TAIL_BYTES = 64 * 1024
+RUN_FATAL_FAILURE_CLASSES = frozenset(
+    {"provider_auth_failed", "provider_rate_limited", "provider_unavailable"}
+)
 SKILL_DISCOVERY_PATHS = {
     "opencode": Path(".config/opencode/skills/pairmux"),
     "claude": Path(".claude/skills/pairmux"),
@@ -63,6 +67,7 @@ class ProcessResult:
     start_error: str | None = None
     termination_signal: int | None = None
     timeout_inflight_call_ids: tuple[str, ...] = ()
+    observed_failure_class: str | None = None
 
 
 @dataclass
@@ -151,7 +156,14 @@ def build_agent_argv(
     working_directory: Path | None = None,
 ) -> list[str]:
     if agent == "opencode":
-        argv = [executable, "--pure", "--auto"]
+        argv = [
+            executable,
+            "--pure",
+            "--auto",
+            "--print-logs",
+            "--log-level",
+            "ERROR",
+        ]
         if model:
             argv.extend(["--model", model])
         argv.extend(["run", "--format", "json"])
@@ -293,6 +305,34 @@ def terminate_process_group(
     return signal.SIGKILL
 
 
+def opencode_provider_failure(stderr_tail: str) -> str | None:
+    """Classify narrow, machine-emitted OpenCode provider failures."""
+    for line in stderr_tail.splitlines():
+        if "level=ERROR" not in line or 'message="stream error"' not in line:
+            continue
+        if re.search(
+            r"(?:FreeUsageLimitError|AI_(?:APICall|Retry)Error:[^\n]*Rate limit exceeded)",
+            line,
+            re.IGNORECASE,
+        ):
+            return "provider_rate_limited"
+        if re.search(
+            r"(?:ProviderAuthError|AI_APICallError:[^\n]*(?:Unauthorized|Forbidden|"
+            r"Invalid API key|Authentication failed|status(?: code)?[=: ]+(?:401|403)))",
+            line,
+            re.IGNORECASE,
+        ):
+            return "provider_auth_failed"
+        if re.search(
+            r"AI_RetryError:[^\n]*(?:Service Unavailable|Bad Gateway|Gateway Timeout|"
+            r"Internal Server Error|status(?: code)?[=: ]+5\d\d)",
+            line,
+            re.IGNORECASE,
+        ):
+            return "provider_unavailable"
+    return None
+
+
 def run_process(
     argv: list[str],
     *,
@@ -305,6 +345,7 @@ def run_process(
     cleanup_group: bool = False,
     pass_fds: tuple[int, ...] = (),
     timeout_observer: Callable[[subprocess.Popen[bytes]], tuple[str, ...]] | None = None,
+    early_failure_detector: Callable[[str], str | None] | None = None,
 ) -> ProcessResult:
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
@@ -329,24 +370,97 @@ def run_process(
                 if stderr_stream is not None:
                     stderr_stream.write((message + "\n").encode())
                 return ProcessResult(None, False, round(time.monotonic() - started, 6), message)
-            try:
-                returncode = process.wait(timeout=timeout)
+            stderr_offset = 0
+            stderr_tail = ""
+
+            def observed_failure() -> str | None:
+                nonlocal stderr_offset, stderr_tail
+                if early_failure_detector is None or stderr_path is None:
+                    return None
+                try:
+                    with stderr_path.open("rb") as source:
+                        source.seek(stderr_offset)
+                        chunk = source.read()
+                except OSError:
+                    return None
+                if not chunk:
+                    return None
+                stderr_offset += len(chunk)
+                stderr_tail = (stderr_tail + chunk.decode(errors="replace"))[
+                    -EARLY_FAILURE_TAIL_BYTES:
+                ]
+                return early_failure_detector(stderr_tail)
+
+            deadline = started + timeout
+            while True:
+                detected = observed_failure()
+                if detected is not None:
+                    termination_signal = terminate_process_group(process)
+                    return ProcessResult(
+                        process.poll(),
+                        False,
+                        round(time.monotonic() - started, 6),
+                        termination_signal=termination_signal,
+                        observed_failure_class=detected,
+                    )
+
+                returncode = process.poll()
+                if returncode is not None:
+                    detected = observed_failure()
+                    cleanup_signal = terminate_process_group(process) if cleanup_group else None
+                    return ProcessResult(
+                        returncode,
+                        False,
+                        round(time.monotonic() - started, 6),
+                        termination_signal=cleanup_signal,
+                        observed_failure_class=detected,
+                    )
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    detected = observed_failure()
+                    if detected is not None:
+                        termination_signal = terminate_process_group(process)
+                        return ProcessResult(
+                            process.poll(),
+                            False,
+                            round(time.monotonic() - started, 6),
+                            termination_signal=termination_signal,
+                            observed_failure_class=detected,
+                        )
+                    returncode = process.poll()
+                    if returncode is not None:
+                        cleanup_signal = (
+                            terminate_process_group(process) if cleanup_group else None
+                        )
+                        return ProcessResult(
+                            returncode,
+                            False,
+                            round(time.monotonic() - started, 6),
+                            termination_signal=cleanup_signal,
+                        )
+                    inflight = timeout_observer(process) if timeout_observer else ()
+                    termination_signal = terminate_process_group(process)
+                    return ProcessResult(
+                        process.poll(),
+                        True,
+                        round(time.monotonic() - started, 6),
+                        termination_signal=termination_signal,
+                        timeout_inflight_call_ids=tuple(inflight),
+                    )
+                try:
+                    returncode = process.wait(timeout=min(0.1, remaining))
+                except subprocess.TimeoutExpired:
+                    continue
+
+                detected = observed_failure()
                 cleanup_signal = terminate_process_group(process) if cleanup_group else None
                 return ProcessResult(
                     returncode,
                     False,
                     round(time.monotonic() - started, 6),
                     termination_signal=cleanup_signal,
-                )
-            except subprocess.TimeoutExpired:
-                inflight = timeout_observer(process) if timeout_observer else ()
-                termination_signal = terminate_process_group(process)
-                return ProcessResult(
-                    process.poll(),
-                    True,
-                    round(time.monotonic() - started, 6),
-                    termination_signal=termination_signal,
-                    timeout_inflight_call_ids=tuple(inflight),
+                    observed_failure_class=detected,
                 )
         finally:
             if stderr_stream is not None:
@@ -1738,6 +1852,8 @@ def failure_class(
         return "setup_failed"
     if agent is None or agent.start_error:
         return "agent_start_failed"
+    if agent.observed_failure_class is not None:
+        return agent.observed_failure_class
     if agent.timed_out:
         return "agent_timeout"
     if agent.returncode != 0:
@@ -1970,6 +2086,9 @@ def run_episode(
                     timeout=timeout,
                     cleanup_group=True,
                     timeout_observer=broker.inflight_at_timeout,
+                    early_failure_detector=(
+                        opencode_provider_failure if agent == "opencode" else None
+                    ),
                 )
             finally:
                 trace = broker.stop_and_finalize()
@@ -2105,6 +2224,9 @@ def run_episode(
         "finished_at": finished_at,
         "timeout_seconds": timeout,
         "timed_out": bool(agent_result and agent_result.timed_out),
+        "agent_observed_failure_class": (
+            agent_result.observed_failure_class if agent_result else None
+        ),
         "agent_group_cleanup_signal": agent_result.termination_signal if agent_result else None,
         "setup_exit_code": setup_result.returncode,
         "agent_exit_code": agent_result.returncode if agent_result else None,
@@ -2209,7 +2331,11 @@ def acceptance_status(
         if len(items) < minimum_repetitions:
             reasons.append(f"{scenario} has {len(items)}/{minimum_repetitions} required repetitions")
             continue
-        rate = sum(1 for item in items if item.get("pass") is True) / len(items)
+        rate = sum(
+            1
+            for item in items
+            if item.get("pass") is True and item.get("failure_class") is None
+        ) / len(items)
         if rate < threshold:
             reasons.append(f"{scenario} pass rate {rate:.3f} is below {threshold:.3f}")
     return {
@@ -2241,6 +2367,8 @@ def summarize(
     skill_md_sha256: str,
     git_start: dict[str, object],
     results: list[dict[str, object]],
+    planned_episodes: int,
+    stop_reason: str | None,
 ) -> dict[str, object]:
     passed = sum(1 for item in results if item["pass"])
     total = len(results)
@@ -2276,6 +2404,14 @@ def summarize(
         "skill_source": str(SKILL_SOURCE),
         "skill_tree_sha256": skill_tree_sha256,
         "skill_md_sha256": skill_md_sha256,
+        "stop_reason": stop_reason,
+        "schedule": {
+            "planned_episodes": planned_episodes,
+            "completed_episodes": total,
+            "skipped_episodes": max(0, planned_episodes - total),
+            "stopped_early": stop_reason is not None and total < planned_episodes,
+            "stop_reason": stop_reason,
+        },
         "totals": {
             "episodes": total,
             "passed": passed,
@@ -2312,6 +2448,8 @@ def write_summary_markdown(path: Path, summary: dict[str, object]) -> None:
     assert isinstance(totals, dict)
     results = summary["results"]
     assert isinstance(results, list)
+    schedule = summary["schedule"]
+    assert isinstance(schedule, dict)
     lines = [
         "# pairmux eval summary",
         "",
@@ -2322,6 +2460,8 @@ def write_summary_markdown(path: Path, summary: dict[str, object]) -> None:
         f"- Pairmux binary: `{summary['pairmux_path']}` (`{summary['pairmux_sha256']}`)",
         f"- Skill tree: `{summary['skill_tree_sha256']}`",
         f"- Result: **{totals['passed']}/{totals['episodes']} passed** ({float(totals['pass_rate']) * 100:.1f}%)",
+        f"- Schedule: {schedule['completed_episodes']}/{schedule['planned_episodes']} episodes; "
+        f"stop reason `{summary['stop_reason'] or 'completed-schedule'}`",
         f"- Broker policy rejections: {totals['broker_policy_rejections']}",
         f"- Wall time: {float(summary['wall_time_seconds']):.3f}s",
         f"- Acceptance eligible: **{str(bool(summary['acceptance']['eligible'])).lower()}** "
@@ -2451,6 +2591,7 @@ def main(argv: list[str] | None = None) -> int:
     skill_md_sha256 = sha256_file(SKILL_SOURCE / "SKILL.md")
     results_path = run_root / "results.jsonl"
     results: list[dict[str, object]] = []
+    stop_reason: str | None = None
 
     with results_path.open("w", encoding="utf-8") as results_stream:
         for scenario in scenarios:
@@ -2515,6 +2656,16 @@ def main(argv: list[str] | None = None) -> int:
                     f"failure={result['failure_class'] or '-'}",
                     file=sys.stderr,
                 )
+                failure = result.get("failure_class")
+                if isinstance(failure, str) and failure in RUN_FATAL_FAILURE_CLASSES:
+                    stop_reason = failure
+                    print(
+                        f"STOP schedule failure={failure} episode={result['episode_id']}",
+                        file=sys.stderr,
+                    )
+                    break
+            if stop_reason is not None:
+                break
 
     summary = summarize(
         run_root=run_root,
@@ -2534,6 +2685,8 @@ def main(argv: list[str] | None = None) -> int:
         skill_md_sha256=skill_md_sha256,
         git_start=git_start,
         results=results,
+        planned_episodes=len(scenarios) * args.repeat,
+        stop_reason=stop_reason,
     )
     print(run_root)
     totals = summary["totals"]
