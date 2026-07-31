@@ -263,6 +263,56 @@ same scoping applies to the positive assertion, so a `--human` hint merely echoe
 `next` does not count as a handoff. The broker ledger is authoritative when an in-flight human wait
 prevents the native transcript event from flushing before timeout.
 
+## The M suite: multi-task performance benchmark
+
+Where S01–S10 ask "does the agent use pairmux correctly?", the M scenarios ask the prior question:
+**does pairmux actually help an agent in a complex multi-task terminal workload?** Each M scenario
+is a small board of concurrent jobs with 2–8 machine-checkable subgoals; episodes score
+fractionally (`score` in results), and every assertion is **harness-agnostic** — task artifacts
+only, never pairmux journals — so the same scenario runs under different terminal-control
+conditions:
+
+| `--terminal-harness` | agent gets | measures |
+|---|---|---|
+| `pmx-cli` (default) | pairmux CLI + installed skill | the full ACI layer |
+| `rawtmux` | tmux + a parity cheat-sheet (`harness/TERMINAL-HOWTO.md`), pairmux hidden | the ACI's value over competent raw tmux |
+| `shell` | only the agent's own shell tool, pairmux hidden | the PTY/handoff 0-to-1 boundary |
+
+Fairness rules: the base TASK.md is byte-identical across harnesses (rawtmux adds one pointer line,
+standing in for automatic skill discovery); the cheat-sheet teaches honest tmux best practice so
+the baseline is as strong as we can make it; both baselines hide pairmux behind a
+command-not-found stub (attempts surface in metrics as `pairmux_stub_hits`).
+
+Current scenarios (the pilot trio; M02/M04–M06/M08 are planned):
+
+| # | scenario | what it measures |
+|---|----------|------------------|
+| M01 | triage board | 3 concurrent jobs: slow-boot server + readiness, ~20s test suite, needle in a 10k-line log, clean shutdown |
+| M03 | credential checkpoint | migration blocks on a password only a scripted human knows; handoff protocol + sidework must keep moving; the secret must never be issued by the agent |
+| M07 | long non-interactive build | the honest control: every harness should pass; only efficiency differs |
+
+M03's human is `human.sh`, a runner-side bot with fixed latency that answers at whatever live
+terminal the agent offers via `handoff.json` (see the scenario's `HANDOFF-PROTOCOL.md`) —
+identical behavior for every harness.
+
+Run them like any scenario (`--scenario M01-M07 --terminal-harness rawtmux`), then extract
+efficiency metrics:
+
+```bash
+python3 evals/metrics.py evals/runs/<run-id>
+```
+
+writes `metrics.jsonl` + `metrics.md` per run: fractional score, wall time, tool calls, token
+usage (real when the agent CLI reports it, `~`-flagged chars/4 estimate otherwise), and
+anti-patterns (`sleep` calls, duplicate commands, capture-pane volume, pairmux stub hits).
+
+Infrastructure self-test — zero model cost; validates that fixtures, `check.sh`, and the
+reference `golden.sh` solutions agree (goldens are control-plane files agents never see):
+
+```bash
+./evals/test-scenarios.sh          # all M scenarios, EVAL_TIME_SCALE=0.15
+```
+
 ## Harness tests
 
 The test suite replaces all three agents and pairmux with local executables; it consumes no model

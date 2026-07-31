@@ -73,12 +73,30 @@ class RunnerTests(unittest.TestCase):
         return run_root, result
 
     def test_scenario_selectors_support_repeats_and_ranges(self) -> None:
-        available = {1: "S01", 2: "S02", 3: "S03", 6: "S06"}
+        available = {
+            ("S", 1): "S01",
+            ("S", 2): "S02",
+            ("S", 3): "S03",
+            ("S", 6): "S06",
+            ("M", 1): "M01",
+            ("M", 2): "M02",
+            ("M", 3): "M03",
+        }
         self.assertEqual(eval_run.parse_scenarios(["S01-S03", "6", "S02"], available), ["S01", "S02", "S03", "S06"])
+        self.assertEqual(eval_run.parse_scenarios(["M01,M03"], available), ["M01", "M03"])
+        self.assertEqual(eval_run.parse_scenarios(["M1-M3"], available), ["M01", "M02", "M03"])
+        # Bare numbers stay S-suite selectors; the default order is S then M.
+        self.assertEqual(eval_run.parse_scenarios(["1"], available), ["S01"])
+        self.assertEqual(
+            eval_run.parse_scenarios(None, available),
+            ["S01", "S02", "S03", "S06", "M01", "M02", "M03"],
+        )
         with self.assertRaisesRegex(ValueError, "ascending"):
             eval_run.parse_scenarios(["S03-S01"], available)
         with self.assertRaisesRegex(ValueError, "unknown"):
             eval_run.parse_scenarios(["S04"], available)
+        with self.assertRaisesRegex(ValueError, "mix suites"):
+            eval_run.parse_scenarios(["S01-M03"], available)
 
     def test_proxy_preserves_literal_argv_and_nonzero_exit(self) -> None:
         runtime = Path(tempfile.mkdtemp(prefix="pmx-proxy-", dir="/tmp")).resolve()

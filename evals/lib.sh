@@ -98,6 +98,50 @@ PY
 pmx_fail() { echo "FAIL: $*" >&2; exit 1; }
 pmx_pass() { echo "PASS${1:+: $1}"; exit 0; }
 
+# ---- subgoal scoring (M suite) ----------------------------------------------
+# M-suite checks score fractionally: record each subgoal, then finish. The
+# ledger lands in $PAIRMUX_EVAL_SUBGOALS_FILE (auto runs) or ./subgoals.json
+# (manual runs); the runner turns it into the episode's score. Assertions must
+# be harness-agnostic: task artifacts only, never pairmux journals.
+
+PMX_SUBGOALS="[]"
+
+# pmx_subgoal <id> <0|1> [detail] — record one subgoal outcome (1 = pass).
+pmx_subgoal() {
+  local id="$1" ok="$2" detail="${3:-}"
+  PMX_SUBGOALS=$(python3 - "$PMX_SUBGOALS" "$id" "$ok" "$detail" <<'PY'
+import json
+import sys
+
+entries = json.loads(sys.argv[1])
+entries.append({"id": sys.argv[2], "pass": sys.argv[3] == "1", "detail": sys.argv[4]})
+print(json.dumps(entries))
+PY
+)
+  if [ "$ok" = "1" ]; then
+    echo "subgoal PASS: $id"
+  else
+    echo "subgoal FAIL: $id${detail:+ — $detail}"
+  fi
+}
+
+# pmx_subgoals_finish — write the ledger; exit 0 iff every subgoal passed.
+pmx_subgoals_finish() {
+  local out="${PAIRMUX_EVAL_SUBGOALS_FILE:-${PAIRMUX_EVAL_SCENARIO_DIR:-.}/subgoals.json}"
+  python3 - "$PMX_SUBGOALS" "$out" <<'PY'
+import json
+import sys
+
+entries = json.loads(sys.argv[1])
+payload = {"schema": "pairmux.eval.subgoals.v1", "subgoals": entries}
+with open(sys.argv[2], "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(payload, indent=2) + "\n")
+passed = sum(1 for entry in entries if entry["pass"])
+print(f"score: {passed}/{len(entries)}")
+raise SystemExit(0 if entries and passed == len(entries) else 1)
+PY
+}
+
 pmx_bin() { printf '%s' "${PAIRMUX_BIN:-pairmux}"; }
 
 # pmx_state_namespace <state-root> <socket> [tmux-tmpdir] — mirror pairmux's endpoint identity.

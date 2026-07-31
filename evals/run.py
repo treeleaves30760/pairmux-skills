@@ -76,6 +76,17 @@ SKILL_DISCOVERY_PATHS = {
     # Codex discovers shared skills from .agents/skills before legacy user roots.
     "codex": Path(".agents/skills/pairmux"),
 }
+TERMINAL_HARNESSES = ("pmx-cli", "rawtmux", "shell")
+HARNESS_NOTES_SOURCE = EVALS_DIR / "harness" / "TERMINAL-HOWTO.md"
+HARNESS_NOTES_NAME = "TERMINAL-HOWTO.md"
+RAWTMUX_TASK_SUFFIX = (
+    "\n\nTerminal-control notes for this environment are in TERMINAL-HOWTO.md"
+    " in the working directory.\n"
+)
+# Baseline harnesses hide pairmux behind a command-not-found stub. The stub
+# still occupies the proxy PATH slot so a host-installed pairmux cannot leak
+# into the episode; attempted invocations surface in the agent transcript.
+PAIRMUX_STUB = "#!/bin/sh\necho \"pairmux: command not found\" >&2\nexit 127\n"
 
 
 class EpisodeCleanupError(RuntimeError):
@@ -91,6 +102,24 @@ GENERATED_NAMES = {
     "haystack.log",
     "port.txt",
     "token.txt",
+    # M-suite artifacts a previous manual run may have left in the fixture dir.
+    "subgoals.json",
+    "answer-server.txt",
+    "answer-tests.txt",
+    "answer-fatal.txt",
+    "answer-build.txt",
+    "build-out.txt",
+    "test-report.txt",
+    "server-port.txt",
+    "server.log",
+    "noisy.log",
+    "DONE.txt",
+    "handoff.json",
+    "handoff-seen.txt",
+    "human-note.txt",
+    "sidework-a.txt",
+    "sidework-b.txt",
+    "migration-done.txt",
 }
 
 
@@ -137,48 +166,58 @@ def non_empty_text(value: str) -> str:
     return parsed
 
 
-def discover_scenarios() -> dict[int, str]:
-    found: dict[int, str] = {}
-    for path in SCENARIOS_DIR.glob("S[0-9]*"):
-        match = re.fullmatch(r"S(\d+)", path.name)
+def discover_scenarios() -> dict[tuple[str, int], str]:
+    """Map (suite, number) -> directory name. S is the skill suite; M is the
+    multi-task performance suite driven across terminal harnesses."""
+    found: dict[tuple[str, int], str] = {}
+    for path in SCENARIOS_DIR.glob("[SM][0-9]*"):
+        match = re.fullmatch(r"([SM])(\d+)", path.name)
         if not path.is_dir() or not match:
             continue
         required = (path / "TASK.md", path / "setup.sh", path / "check.sh")
         if all(item.is_file() for item in required):
-            found[int(match.group(1))] = path.name
+            found[(match.group(1), int(match.group(2)))] = path.name
     return found
 
 
-def parse_scenarios(selectors: list[str] | None, available: dict[int, str]) -> list[str]:
+def parse_scenarios(
+    selectors: list[str] | None, available: dict[tuple[str, int], str]
+) -> list[str]:
     if not available:
         raise ValueError(f"no scenarios found under {SCENARIOS_DIR}")
     if not selectors:
-        return [available[number] for number in sorted(available)]
+        # Default order keeps the historical S suite first, then the M suite.
+        ordered_keys = sorted(available, key=lambda key: (key[0] != "S", key[1]))
+        return [available[key] for key in ordered_keys]
 
-    selected: list[int] = []
+    selected: list[tuple[str, int]] = []
     for selector in selectors:
         for raw_part in selector.split(","):
             part = raw_part.strip().upper()
-            match = re.fullmatch(r"S?(\d+)(?:\s*-\s*S?(\d+))?", part)
+            match = re.fullmatch(r"([SM]?)(\d+)(?:\s*-\s*([SM]?)(\d+))?", part)
             if not match:
                 raise ValueError(f"invalid scenario selector: {raw_part!r}")
-            first = int(match.group(1))
-            last = int(match.group(2) or first)
+            suite = match.group(1) or "S"
+            first = int(match.group(2))
+            last_suite = match.group(3) or suite
+            if last_suite != suite:
+                raise ValueError(f"scenario range cannot mix suites: {raw_part!r}")
+            last = int(match.group(4) or first)
             if last < first:
                 raise ValueError(f"scenario range must be ascending: {raw_part!r}")
-            selected.extend(range(first, last + 1))
+            selected.extend((suite, number) for number in range(first, last + 1))
 
-    missing = sorted({number for number in selected if number not in available})
+    missing = sorted({key for key in selected if key not in available})
     if missing:
-        rendered = ", ".join(f"S{number:02d}" for number in missing)
+        rendered = ", ".join(f"{suite}{number:02d}" for suite, number in missing)
         raise ValueError(f"unknown scenario(s): {rendered}")
 
     ordered: list[str] = []
-    seen: set[int] = set()
-    for number in selected:
-        if number not in seen:
-            ordered.append(available[number])
-            seen.add(number)
+    seen: set[tuple[str, int]] = set()
+    for key in selected:
+        if key not in seen:
+            ordered.append(available[key])
+            seen.add(key)
     return ordered
 
 
@@ -1023,7 +1062,9 @@ def copy_fixture_worktree(scenario: str, work_root: Path) -> Path:
     source = SCENARIOS_DIR / scenario
     destination = work_root / scenario
     destination.mkdir(parents=True)
-    excluded = {"TASK.md", "setup.sh", "check.sh", "env.sh"}
+    # golden.sh (reference solution) and human.sh (M03's scripted human) are
+    # control-plane files the agent must never see.
+    excluded = {"TASK.md", "setup.sh", "check.sh", "env.sh", "golden.sh", "human.sh"}
     for path in source.iterdir():
         if path.name in excluded or path.name in GENERATED_NAMES or path.name.startswith("transcript"):
             continue
@@ -1047,6 +1088,12 @@ def prepare_control_sources(scenario: str, control_root: Path) -> tuple[Path, di
         source_dir / "check.sh": destination / "check.sh",
         source_dir / "TASK.md": destination / "TASK.md",
     }
+    # Optional control-plane companions (M03's scripted human, reference
+    # solutions). They live beside setup.sh, never in the agent worktree.
+    for name in ("human.sh", "golden.sh"):
+        optional = source_dir / name
+        if optional.is_file():
+            files[optional] = destination / name
     expected: dict[Path, str] = {}
     for source, target in files.items():
         shutil.copy2(source, target)
@@ -2095,6 +2142,31 @@ def validate_scenario_calls(scenario: str, calls: list[dict[str, object]]) -> li
     return errors
 
 
+def read_subgoals(path: Path) -> list[dict[str, object]]:
+    """Read a check.sh-written subgoal ledger (M suite). Best effort: an
+    absent or malformed file simply yields no subgoals."""
+    if not path.is_file():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    entries = payload.get("subgoals") if isinstance(payload, dict) else None
+    if not isinstance(entries, list):
+        return []
+    subgoals: list[dict[str, object]] = []
+    for entry in entries:
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str):
+            subgoals.append(
+                {
+                    "id": entry["id"],
+                    "pass": entry.get("pass") is True,
+                    "detail": str(entry.get("detail", "")),
+                }
+            )
+    return subgoals
+
+
 def atomic_json(path: Path, payload: object) -> None:
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     with temporary.open("w", encoding="utf-8") as stream:
@@ -2263,6 +2335,7 @@ def run_episode(
     pairmux_sha256: str,
     git_start: dict[str, object],
     timeout: float,
+    terminal_harness: str = "pmx-cli",
 ) -> dict[str, object]:
     episode_started_at = utc_now()
     episode_started = time.monotonic()
@@ -2289,30 +2362,42 @@ def run_episode(
     socket_name = f"pmx-eval-{uniqueness}"
     scenario_dir = copy_fixture_worktree(scenario, work_root)
     control_scenario, control_hashes = prepare_control_sources(scenario, control_root)
-    skill_dir, skill_tree_sha256, skill_md_sha256 = install_isolated_skill(
-        agent, isolated_home, work_root
-    )
+    skill_dir: Path | None = None
+    skill_tree_sha256 = "not-installed"
+    skill_md_sha256 = "not-installed"
     claude_sentinel_token: str | None = None
-    if agent == "claude":
-        claude_sentinel_token = f"PAIRmux-discovery-{uuid.uuid4().hex}"
-        sentinel_dir = work_root / ".claude/skills/pairmux-eval-sentinel"
-        sentinel_dir.mkdir(parents=True)
-        (sentinel_dir / "SKILL.md").write_text(
-            "---\n"
-            "name: pairmux-eval-sentinel\n"
-            "description: Internal isolated eval discovery sentinel.\n"
-            "---\n\n"
-            f"When invoked, respond with exactly `{claude_sentinel_token}` and nothing else.\n",
-            encoding="utf-8",
+    if terminal_harness == "pmx-cli":
+        skill_dir, skill_tree_sha256, skill_md_sha256 = install_isolated_skill(
+            agent, isolated_home, work_root
         )
-        make_read_only_tree(sentinel_dir)
-    skill_discovery_path = str(skill_dir)
+        if agent == "claude":
+            claude_sentinel_token = f"PAIRmux-discovery-{uuid.uuid4().hex}"
+            sentinel_dir = work_root / ".claude/skills/pairmux-eval-sentinel"
+            sentinel_dir.mkdir(parents=True)
+            (sentinel_dir / "SKILL.md").write_text(
+                "---\n"
+                "name: pairmux-eval-sentinel\n"
+                "description: Internal isolated eval discovery sentinel.\n"
+                "---\n\n"
+                f"When invoked, respond with exactly `{claude_sentinel_token}` and nothing else.\n",
+                encoding="utf-8",
+            )
+            make_read_only_tree(sentinel_dir)
+        make_read_only_tree(skill_dir)
+    elif terminal_harness == "rawtmux":
+        # Teaching parity: the raw-tmux baseline gets a workspace cheat-sheet
+        # in place of the skill, so the comparison isolates the ACI layer
+        # rather than "does the model know tmux exists".
+        shutil.copy2(HARNESS_NOTES_SOURCE, scenario_dir / HARNESS_NOTES_NAME)
+    skill_discovery_path = str(skill_dir) if skill_dir is not None else "not-installed"
     skill_artifact_dir = artifact_root / "skill"
-    make_read_only_tree(skill_dir)
     make_read_only_tree(control_root / "evals")
 
     proxy_path = proxy_dir / "pairmux"
-    shutil.copy2(PROXY_SOURCE, proxy_path)
+    if terminal_harness == "pmx-cli":
+        shutil.copy2(PROXY_SOURCE, proxy_path)
+    else:
+        proxy_path.write_text(PAIRMUX_STUB, encoding="utf-8")
     proxy_path.chmod(0o555)
     real_proxy_target = control_runtime / "real-pairmux"
     shutil.copy2(real_pairmux, real_proxy_target)
@@ -2322,6 +2407,10 @@ def run_episode(
     task_path = control_scenario / "TASK.md"
     verify_hashes(control_hashes)
     task = task_path.read_text(encoding="utf-8")
+    # The base task text is identical across harnesses; rawtmux gets one
+    # pointer line, standing in for the automatic skill discovery pmx-cli has.
+    if terminal_harness == "rawtmux":
+        task = task + RAWTMUX_TASK_SUFFIX
     task_sha256 = hashlib.sha256(task.encode()).hexdigest()
     agent_argv = build_agent_argv(
         agent,
@@ -2422,32 +2511,51 @@ def run_episode(
                 env=clean_env,
             )
 
-            discovery = verify_skill_discovery(
-                agent=agent,
-                executable=agent_executable,
-                agent_version=agent_version,
-                env=clean_env,
-                cwd=scenario_dir,
-                skill_dir=skill_dir,
-                host_home=host_home,
-                evidence_path=evidence_dir / "skill-discovery.log",
-                model=model,
-                claude_sentinel_token=claude_sentinel_token,
-            )
+            if terminal_harness == "pmx-cli":
+                assert skill_dir is not None
+                discovery = verify_skill_discovery(
+                    agent=agent,
+                    executable=agent_executable,
+                    agent_version=agent_version,
+                    env=clean_env,
+                    cwd=scenario_dir,
+                    skill_dir=skill_dir,
+                    host_home=host_home,
+                    evidence_path=evidence_dir / "skill-discovery.log",
+                    model=model,
+                    claude_sentinel_token=claude_sentinel_token,
+                )
+            else:
+                discovery = {
+                    "verified": False,
+                    "method": f"not-applicable-{terminal_harness}",
+                    "path": None,
+                }
 
             agent_env = clean_env.copy()
-            agent_env.update(
-                {
-                    "PATH": str(proxy_dir) + os.pathsep + clean_env.get("PATH", ""),
-                    "PAIRMUX_BIN": str(proxy_path),
-                    "PAIRMUX_EVAL_PROXY_DIR": str(proxy_dir),
-                    "PAIRMUX_EVAL_PROXY_BIN": str(proxy_path),
-                    "PAIRMUX_SOCKET": socket_name,
-                    "PAIRMUX_STATE_DIR": str(state_dir),
-                    "TMUX_TMPDIR": tmux_tmpdir,
-                    "PAIRMUX_STATE_NAMESPACE": str(state_namespace),
-                }
-            )
+            agent_env["PATH"] = str(proxy_dir) + os.pathsep + clean_env.get("PATH", "")
+            if terminal_harness == "pmx-cli":
+                agent_env.update(
+                    {
+                        "PAIRMUX_BIN": str(proxy_path),
+                        "PAIRMUX_EVAL_PROXY_DIR": str(proxy_dir),
+                        "PAIRMUX_EVAL_PROXY_BIN": str(proxy_path),
+                        "PAIRMUX_SOCKET": socket_name,
+                        "PAIRMUX_STATE_DIR": str(state_dir),
+                        "TMUX_TMPDIR": tmux_tmpdir,
+                        "PAIRMUX_STATE_NAMESPACE": str(state_namespace),
+                    }
+                )
+            else:
+                # Baselines never see PAIRMUX_* names; the shared tmux endpoint
+                # (used by fixtures, the M03 human bot, and check assertions)
+                # is advertised under a neutral name instead.
+                agent_env.update(
+                    {
+                        "EVAL_TMUX_SOCKET": socket_name,
+                        "TMUX_TMPDIR": tmux_tmpdir,
+                    }
+                )
             agent_env.update(shell_path_guard)
             broker_env = clean_env.copy()
             broker_env.update(
@@ -2490,7 +2598,9 @@ def run_episode(
             rejections = trace.rejections
             write_broker_calls(calls_path, calls)
             write_broker_rejections(rejections_path, rejections)
-            if not skill_dir.is_dir() or sha256_tree(skill_dir) != skill_tree_sha256:
+            if skill_dir is not None and (
+                not skill_dir.is_dir() or sha256_tree(skill_dir) != skill_tree_sha256
+            ):
                 trace_errors.append("installed skill changed while the agent was running")
             scenario_trace_errors = validate_scenario_calls(scenario, calls)
             proof = {
@@ -2506,6 +2616,8 @@ def run_episode(
                 {
                     "PAIRMUX_EVAL_CALLS_FILE": str(calls_path),
                     "PAIRMUX_EVAL_TRACE_PROOF": str(proof_path),
+                    "PAIRMUX_EVAL_SUBGOALS_FILE": str(evidence_dir / "subgoals.json"),
+                    "PAIRMUX_EVAL_TERMINAL_HARNESS": terminal_harness,
                 }
             )
             verify_hashes(control_hashes)
@@ -2540,13 +2652,14 @@ def run_episode(
                 "broker-rejections.jsonl",
                 "trace-proof.json",
                 "skill-discovery.log",
+                "subgoals.json",
             ):
                 source = evidence_dir / name
                 if source.is_file():
                     shutil.copy2(source, episode_root / name)
             if env_file.is_file():
                 shutil.copy2(env_file, artifact_root / "env.sh")
-            if skill_dir.is_dir():
+            if skill_dir is not None and skill_dir.is_dir():
                 shutil.copytree(skill_dir, skill_artifact_dir)
             else:
                 skill_artifact_dir.mkdir()
@@ -2582,6 +2695,7 @@ def run_episode(
         }
         atomic_json(artifact_root / "control-manifest.json", control_manifest)
 
+    subgoals = read_subgoals(episode_root / "subgoals.json")
     category = failure_class(setup_result, agent_result, check_result)
     expected_handoff = bool(
         scenario == "S05"
@@ -2606,6 +2720,10 @@ def run_episode(
         outcome = "passed"
     else:
         outcome = "failed"
+    if subgoals:
+        score = round(sum(1 for goal in subgoals if goal["pass"]) / len(subgoals), 6)
+    else:
+        score = 1.0 if category is None else 0.0
     finished_at = utc_now()
     result: dict[str, object] = {
         "schema": RESULT_SCHEMA,
@@ -2613,6 +2731,9 @@ def run_episode(
         "episode_id": episode_id,
         "agent": agent,
         "agent_version": agent_version,
+        "terminal_harness": terminal_harness,
+        "score": score,
+        "subgoals": subgoals,
         "model": model or "default",
         "provider": provider or inferred_provider(model) or "unverified-default",
         "provider_verified": provider is not None,
@@ -2765,6 +2886,7 @@ def summarize(
     provider: str | None,
     acceptance_profile: str,
     codex_sandbox: str,
+    terminal_harness: str,
     pairmux_version: str,
     pairmux_path: str,
     pairmux_sha256: str,
@@ -2777,6 +2899,13 @@ def summarize(
 ) -> dict[str, object]:
     passed = sum(1 for item in results if item["pass"])
     total = len(results)
+
+    def item_score(item: dict[str, object]) -> float:
+        value = item.get("score")
+        if isinstance(value, (int, float)):
+            return float(value)
+        return 1.0 if item.get("pass") else 0.0
+
     scenarios: dict[str, dict[str, object]] = {}
     for scenario in sorted({str(item["scenario"]) for item in results}):
         items = [item for item in results if item["scenario"] == scenario]
@@ -2785,6 +2914,7 @@ def summarize(
             "episodes": len(items),
             "passed": scenario_passed,
             "pass_rate": round(scenario_passed / len(items), 6),
+            "mean_score": round(sum(item_score(item) for item in items) / len(items), 6),
             "steps": sum(int(item["steps"]) for item in items),
             "broker_policy_rejections": sum(
                 int(item["broker_policy_rejections"]) for item in items
@@ -2803,6 +2933,7 @@ def summarize(
         "provider": provider or inferred_provider(model) or "unverified-default",
         "provider_verified": provider is not None,
         "codex_sandbox": codex_sandbox if agent == "codex" else None,
+        "terminal_harness": terminal_harness,
         "pairmux_version": pairmux_version,
         "pairmux_path": pairmux_path,
         "pairmux_sha256": pairmux_sha256,
@@ -2861,6 +2992,7 @@ def write_summary_markdown(path: Path, summary: dict[str, object]) -> None:
         f"- Run: `{summary['run_id']}`",
         f"- Agent: `{summary['agent']}` (`{summary['agent_version']}`)",
         f"- Model: `{summary['model']}`",
+        f"- Terminal harness: `{summary['terminal_harness']}`",
         f"- Pairmux: `{summary['pairmux_version']}`",
         f"- Pairmux binary: `{summary['pairmux_path']}` (`{summary['pairmux_sha256']}`)",
         f"- Skill tree: `{summary['skill_tree_sha256']}`",
@@ -2872,14 +3004,18 @@ def write_summary_markdown(path: Path, summary: dict[str, object]) -> None:
         f"- Acceptance eligible: **{str(bool(summary['acceptance']['eligible'])).lower()}** "
         f"(`{summary['acceptance']['profile']}`)",
         "",
-        "| scenario | repeat | result | executed steps | policy rejections | wall time | failure class |",
-        "|---|---:|---|---:|---:|---:|---|",
+        "| scenario | repeat | result | score | executed steps | policy rejections | wall time | failure class |",
+        "|---|---:|---|---:|---:|---:|---:|---|",
     ]
     for item in results:
         status = str(item.get("outcome", "passed" if item["pass"] else "failed"))
         failure = item["failure_class"] or "-"
+        score = item.get("score")
+        if not isinstance(score, (int, float)):
+            score = 1.0 if item["pass"] else 0.0
         lines.append(
-            f"| {item['scenario']} | {item['repeat']} | {status} | {item['steps']} | "
+            f"| {item['scenario']} | {item['repeat']} | {status} | {float(score):.2f} | "
+            f"{item['steps']} | "
             f"{item['broker_policy_rejections']} | {float(item['wall_time_seconds']):.3f}s | "
             f"{failure} |"
         )
@@ -2918,7 +3054,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--scenario",
         action="append",
-        help="scenario or ascending range; repeatable (examples: S01, 2-5, S01-S06)",
+        help="scenario or ascending range; repeatable (examples: S01, 2-5, S01-S06, M01, M1-M3)",
+    )
+    parser.add_argument(
+        "--terminal-harness",
+        choices=TERMINAL_HARNESSES,
+        default="pmx-cli",
+        help="terminal-control condition for the M suite: pairmux CLI + skill (default), "
+        "raw tmux with a parity cheat-sheet, or the agent's bare shell tool "
+        "(pairmux is hidden behind a command-not-found stub in both baselines)",
     )
     parser.add_argument("--repeat", type=positive_int, default=1, help="episodes per scenario (default: 1)")
     parser.add_argument(
@@ -2990,6 +3134,17 @@ def main(argv: list[str] | None = None) -> int:
         scenarios = parse_scenarios(args.scenario, discover_scenarios())
     except ValueError as error:
         parser.error(str(error))
+    if args.terminal_harness != "pmx-cli":
+        offending = [name for name in scenarios if name.startswith("S")]
+        if offending:
+            print(
+                f"warning: the S suite teaches pairmux itself; running {', '.join(offending)} "
+                f"under --terminal-harness {args.terminal_harness} will fail their call-trace "
+                "proofs by design",
+                file=sys.stderr,
+            )
+        if not HARNESS_NOTES_SOURCE.is_file() and args.terminal_harness == "rawtmux":
+            parser.error(f"rawtmux cheat-sheet is missing: {HARNESS_NOTES_SOURCE}")
 
     agent_executable = shutil.which(args.agent) or args.agent
     if args.dry_run:
@@ -2999,6 +3154,7 @@ def main(argv: list[str] | None = None) -> int:
                 plan = {
                     "agent": args.agent,
                     "model": args.model or "default",
+                    "terminal_harness": args.terminal_harness,
                     "scenario": scenario,
                     "repeat": repetition,
                     "cwd": str(SCENARIOS_DIR / scenario),
@@ -3083,6 +3239,7 @@ def main(argv: list[str] | None = None) -> int:
                         pairmux_sha256=pairmux_sha256,
                         git_start=git_start,
                         timeout=args.timeout,
+                        terminal_harness=args.terminal_harness,
                     )
                 except Exception as error:  # Normalize harness failures into auditable episodes.
                     normalized_failure = (
@@ -3104,6 +3261,9 @@ def main(argv: list[str] | None = None) -> int:
                         "provider_verified": args.provider is not None,
                         "scenario": scenario,
                         "repeat": repetition,
+                        "terminal_harness": args.terminal_harness,
+                        "score": 0.0,
+                        "subgoals": [],
                         "pass": False,
                         "outcome": "failed",
                         "steps": 0,
@@ -3167,6 +3327,7 @@ def main(argv: list[str] | None = None) -> int:
         provider=args.provider,
         acceptance_profile=args.acceptance_profile,
         codex_sandbox=args.codex_sandbox,
+        terminal_harness=args.terminal_harness,
         pairmux_version=pairmux_version,
         pairmux_path=real_pairmux,
         pairmux_sha256=pairmux_sha256,
