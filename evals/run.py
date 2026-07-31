@@ -228,6 +228,7 @@ def build_agent_argv(
     model: str | None,
     codex_sandbox: str,
     working_directory: Path | None = None,
+    model_variant: str | None = None,
 ) -> list[str]:
     if agent == "opencode":
         argv = [
@@ -241,6 +242,8 @@ def build_agent_argv(
         if model:
             argv.extend(["--model", model])
         argv.extend(["run", "--format", "json"])
+        if model_variant:
+            argv.extend(["--variant", model_variant])
         if working_directory is not None:
             argv.extend(["--dir", str(working_directory.resolve())])
         argv.append(task)
@@ -854,6 +857,31 @@ def verify_skill_discovery(
     if leaked:
         raise RuntimeError(f"{method} reported host skill paths: {leaked}")
     return {"verified": True, "method": method, "path": str(expected)}
+
+
+HOST_OPENCODE_MODELS_CACHE = Path.home() / ".cache" / "opencode" / "models.json"
+
+
+def seed_opencode_models_cache(clean_env: dict[str, str]) -> dict[str, object]:
+    """Seed the isolated opencode cache with the host's models.dev catalog.
+
+    The catalog bundled into the opencode binary lags models.dev, so a
+    recently released model resolves on the host (warm cache) but raises
+    ProviderModelNotFoundError inside the isolated HOME. The catalog is public
+    metadata, not user state or credentials; the copy is recorded by hash."""
+    record: dict[str, object] = {
+        "seeded": False,
+        "source": str(HOST_OPENCODE_MODELS_CACHE),
+        "sha256": None,
+    }
+    if not HOST_OPENCODE_MODELS_CACHE.is_file():
+        return record
+    destination = Path(clean_env["XDG_CACHE_HOME"]) / "opencode" / "models.json"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(HOST_OPENCODE_MODELS_CACHE, destination)
+    record["seeded"] = True
+    record["sha256"] = sha256_file(destination)
+    return record
 
 
 def pairmux_state_namespace(state_root: Path, socket_name: str, tmux_tmpdir: str) -> Path:
@@ -2336,6 +2364,7 @@ def run_episode(
     git_start: dict[str, object],
     timeout: float,
     terminal_harness: str = "pmx-cli",
+    model_variant: str | None = None,
 ) -> dict[str, object]:
     episode_started_at = utc_now()
     episode_started = time.monotonic()
@@ -2419,6 +2448,7 @@ def run_episode(
         model,
         codex_sandbox,
         working_directory=scenario_dir,
+        model_variant=model_variant,
     )
 
     host_home = Path(os.environ.get("HOME", "~")).expanduser()
@@ -2432,6 +2462,9 @@ def run_episode(
         "CLAUDE_CONFIG_DIR",
     ):
         Path(clean_env[variable]).mkdir(parents=True, exist_ok=True)
+    models_cache: dict[str, object] = {"seeded": False, "source": None, "sha256": None}
+    if agent == "opencode":
+        models_cache = seed_opencode_models_cache(clean_env)
     tmux_tmpdir = clean_env.get("TMPDIR", "/tmp")
     state_namespace = pairmux_state_namespace(state_dir, socket_name, tmux_tmpdir)
     env_file = control_runtime / "env.sh"
@@ -2735,8 +2768,10 @@ def run_episode(
         "score": score,
         "subgoals": subgoals,
         "model": model or "default",
+        "model_variant": model_variant,
         "provider": provider or inferred_provider(model) or "unverified-default",
         "provider_verified": provider is not None,
+        "opencode_models_cache": models_cache,
         "credential_injection": credential_injection,
         "control_cleanup_failure_class": control_cleanup_failure,
         "scenario": scenario,
@@ -2887,6 +2922,7 @@ def summarize(
     acceptance_profile: str,
     codex_sandbox: str,
     terminal_harness: str,
+    model_variant: str | None,
     pairmux_version: str,
     pairmux_path: str,
     pairmux_sha256: str,
@@ -2934,6 +2970,7 @@ def summarize(
         "provider_verified": provider is not None,
         "codex_sandbox": codex_sandbox if agent == "codex" else None,
         "terminal_harness": terminal_harness,
+        "model_variant": model_variant,
         "pairmux_version": pairmux_version,
         "pairmux_path": pairmux_path,
         "pairmux_sha256": pairmux_sha256,
@@ -2991,7 +3028,8 @@ def write_summary_markdown(path: Path, summary: dict[str, object]) -> None:
         "",
         f"- Run: `{summary['run_id']}`",
         f"- Agent: `{summary['agent']}` (`{summary['agent_version']}`)",
-        f"- Model: `{summary['model']}`",
+        f"- Model: `{summary['model']}`"
+        + (f" (variant `{summary['model_variant']}`)" if summary.get("model_variant") else ""),
         f"- Terminal harness: `{summary['terminal_harness']}`",
         f"- Pairmux: `{summary['pairmux_version']}`",
         f"- Pairmux binary: `{summary['pairmux_path']}` (`{summary['pairmux_sha256']}`)",
@@ -3028,6 +3066,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--agent", required=True, choices=("opencode", "claude", "codex"))
     parser.add_argument(
         "--model", type=non_empty_text, help="agent model identifier (agent default when omitted)"
+    )
+    parser.add_argument(
+        "--model-variant",
+        type=non_empty_text,
+        help="provider-specific reasoning-effort variant passed to the agent CLI "
+        "(OpenCode --variant, e.g. high, max, minimal); OpenCode only",
     )
     parser.add_argument(
         "--provider",
@@ -3107,6 +3151,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(
             f"--provider {args.provider!r} does not match model prefix {model_provider!r}"
         )
+    if args.model_variant and args.agent != "opencode":
+        parser.error("--model-variant is only supported with --agent opencode")
     if args.opencode_auth_file is not None or args.opencode_auth_env is not None:
         if args.agent != "opencode":
             parser.error("OpenCode auth injection is only valid with --agent opencode")
@@ -3154,6 +3200,7 @@ def main(argv: list[str] | None = None) -> int:
                 plan = {
                     "agent": args.agent,
                     "model": args.model or "default",
+                    "model_variant": args.model_variant,
                     "terminal_harness": args.terminal_harness,
                     "scenario": scenario,
                     "repeat": repetition,
@@ -3166,6 +3213,7 @@ def main(argv: list[str] | None = None) -> int:
                         args.model,
                         args.codex_sandbox,
                         working_directory=SCENARIOS_DIR / scenario,
+                        model_variant=args.model_variant,
                     ),
                 }
                 print(json.dumps(plan, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
@@ -3240,6 +3288,7 @@ def main(argv: list[str] | None = None) -> int:
                         git_start=git_start,
                         timeout=args.timeout,
                         terminal_harness=args.terminal_harness,
+                        model_variant=args.model_variant,
                     )
                 except Exception as error:  # Normalize harness failures into auditable episodes.
                     normalized_failure = (
@@ -3264,6 +3313,7 @@ def main(argv: list[str] | None = None) -> int:
                         "terminal_harness": args.terminal_harness,
                         "score": 0.0,
                         "subgoals": [],
+                        "model_variant": args.model_variant,
                         "pass": False,
                         "outcome": "failed",
                         "steps": 0,
@@ -3328,6 +3378,7 @@ def main(argv: list[str] | None = None) -> int:
         acceptance_profile=args.acceptance_profile,
         codex_sandbox=args.codex_sandbox,
         terminal_harness=args.terminal_harness,
+        model_variant=args.model_variant,
         pairmux_version=pairmux_version,
         pairmux_path=real_pairmux,
         pairmux_sha256=pairmux_sha256,

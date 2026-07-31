@@ -156,6 +156,7 @@ def episode_metrics(episode_dir: Path) -> dict | None:
         "scenario": result.get("scenario"),
         "agent": result.get("agent"),
         "model": result.get("model"),
+        "model_variant": result.get("model_variant"),
         "terminal_harness": result.get("terminal_harness", "pmx-cli"),
         "pass": result.get("pass"),
         "outcome": result.get("outcome"),
