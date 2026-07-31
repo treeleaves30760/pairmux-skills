@@ -2481,7 +2481,7 @@ def run_episode(
     discovery: dict[str, object] = {
         "verified": False,
         "method": "not-run",
-        "path": str(skill_dir / "SKILL.md"),
+        "path": str(skill_dir / "SKILL.md") if skill_dir is not None else None,
     }
     credential_injection: dict[str, object] = {
         "method": "none",
