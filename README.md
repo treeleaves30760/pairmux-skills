@@ -11,7 +11,7 @@ of truth; the pairmux CLI embeds a synced copy for `pairmux skill install`.
 ```
 pairmux-skills/
   skills/pairmux/
-    SKILL.md              # ≤180 lines: when to use, the golden loop, the iron rules
+    SKILL.md              # ≤200 lines: when to use, the golden loop, the iron rules
     references/
       commands.md         # every command, every flag, the full pairmux.v1 envelope schema
       interactive.md      # REPLs, pagers, [y/N], the never-guess-secrets rule
