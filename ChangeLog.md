@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The skill now leads with what an exec-style shell tool cannot do at all — driving interactive
+  programs in a real PTY, persistent shell state, and live human handoff — and demotes slow
+  non-interactive commands to "use pairmux when they share that live terminal". The when-to-use
+  boundary states plainly that a harness's own background execution often serves plain long
+  builds/tests just as well.
+- `run`'s documented contract is one quoted command argument (matching the MCP tool); the variadic
+  form is now an `E_BAD_ARGS` with a corrected-quoting hint.
+- The never-guess-secrets rule covers the broadened secret classes (PIN, OTP/MFA/verification
+  codes, API keys, localized sudo prompts), states that recognition is best-effort and
+  English-biased, teaches the quiet-`running`-on-a-credential-command handoff heuristic, and
+  documents the `PAIRMUX_SECRET_PROMPT_RE` extension point.
+- New `pairmux prune` coverage: cheat-sheet row, command reference, and a troubleshooting recipe
+  for reclaiming huge journals (rotate with kill+new, then prune).
+
 ### Added
 
 - Repeatable cross-agent eval runner (`evals/run.py`) for OpenCode, Claude Code, and Codex with range
