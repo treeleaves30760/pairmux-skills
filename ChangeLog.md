@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The M suite: a multi-task performance benchmark measuring whether pairmux actually helps an
+  agent, not just whether it is used correctly. `run.py --terminal-harness {pmx-cli,rawtmux,shell}`
+  runs the same byte-identical task under the full ACI, a raw-tmux baseline with a parity
+  cheat-sheet (`evals/harness/TERMINAL-HOWTO.md`), or the agent's bare shell tool — baselines hide
+  pairmux behind a command-not-found stub. Episodes score fractionally from harness-agnostic
+  subgoal ledgers (`score` and `subgoals` in results/summary). Pilot scenarios: M01 (triage board:
+  server readiness + test suite + log needle, concurrently), M03 (credential checkpoint with a
+  scripted human bot answering at whatever live terminal the agent offers via `handoff.json`),
+  M07 (long non-interactive build — the honest control). Reference `golden.sh` solutions and
+  `evals/test-scenarios.sh` validate fixtures/checks at zero model cost, and `evals/metrics.py`
+  extracts wall time, tool calls, token usage, and anti-pattern counts from all three agents'
+  transcripts into `metrics.jsonl`/`metrics.md`.
+
 ### Changed
 
 - The skill now leads with what an exec-style shell tool cannot do at all — driving interactive
