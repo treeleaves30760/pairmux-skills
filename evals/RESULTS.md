@@ -172,3 +172,27 @@ Run with the harness in [README.md](README.md), record here:
 
 DeepSeek V4 Flash acceptance is established by run
 `20260719T073333.055301Z-76364-d8febe70`; the earlier one-off S01 canary remains diagnostic only.
+
+## M-suite pilot runs (calibration, not acceptance)
+
+### 2026-08-01 — opencode 1.18.9 / openrouter/deepseek/deepseek-v4-flash-0731 (variant `max`) — macOS (darwin arm64), tmux 3.7b
+
+Pilot for the multi-task performance benchmark: `--scenario M01,M03,M07 --repeat 2 --timeout 420`
+across all three `--terminal-harness` conditions, `--opencode-auth-file` credential isolation,
+pairmux `0.1.0-dev` (sibling build), skills repo @ `61d48eab5`. Runs (auditable under `evals/runs/`,
+metrics in each run's `metrics.jsonl`/`metrics.md`):
+
+| harness | run id | passed | mean score M01/M03/M07 | mean wall M01/M03/M07 |
+|---|---|---|---|---|
+| pmx-cli | `20260731T234237.647891Z-91130-fc3715e5` | 5/6 | 1.00 / 0.90 / 1.00 | 195s / 135s / 82s |
+| rawtmux | `20260731T235623.829851Z-7824-8da40a78` | 5/6 | 1.00 / 0.70 / 1.00 | 110s / 266s / 103s |
+| shell | `20260801T001550.920690Z-27788-5398f9f2` | 5/6 | 0.60 / 1.00 / 1.00 | 106s / 177s / 80s |
+
+Calibration findings (n=2 — directional only): M07 confirms the honest control (pmx-cli agents
+correctly skip pairmux; the rawtmux cheat-sheet costs +25% wall / 2.2× tool calls there); M03
+separates on wall time and failure shape (pmx-cli's one miss was only the DONE.txt marker, 4/5
+subgoals; rawtmux burned a full 420s timeout); the shell condition self-assembled tmux for M03
+(host tmux on PATH) and attempted the hidden pairmux 4 times (stub hits); one shell M01 failure was
+an OpenRouter 504, not capability. Zero secret leaks in 18/18 episodes. Before P5: raise M01's
+interactive weight, decide whether the shell condition strips tmux from PATH, tag provider-5xx as
+infra failures, and run n≥5.
