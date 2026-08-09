@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The skill teaches `wait --done`: subscribing to a terminal another agent (or a human) is driving,
+  which blocks until its command finishes and reports the `exit_code`. Any number of agents can
+  hold one at once.
 - The M suite: a multi-task performance benchmark measuring whether pairmux actually helps an
   agent, not just whether it is used correctly. `run.py --terminal-harness {pmx-cli,rawtmux,shell}`
   runs the same byte-identical task under the full ACI, a raw-tmux baseline with a parity
@@ -23,6 +26,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transcripts into `metrics.jsonl`/`metrics.md`.
 
 ### Changed
+
+- The handoff loop no longer teaches that `wait --human` ends only on a note. It also ends when the
+  *human* is finished — the prompt is answered and the terminal is visibly moving again (`running`,
+  with `wait --done` offered for following the command the rest of the way), or the command
+  finishes outright (`done` + `exit_code`) — and returns no `output` in those cases, because the
+  span it would quote is the span the human typed into. A note is now documented as how the human
+  says *what* they did, not as the precondition for the agent to resume.
+- A `timeout` is documented as "the human has not come yet", with the instruction to run the `next`
+  hint — the same wait at a longer deadline — rather than act alone or change strategy.
+
 
 - The skill now leads with what an exec-style shell tool cannot do at all — driving interactive
   programs in a real PTY, persistent shell state, and live human handoff — and demotes slow
