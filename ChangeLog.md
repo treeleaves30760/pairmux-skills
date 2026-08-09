@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-08-10
+
 ### Added
 
 - The skill teaches `wait --done`: subscribing to a terminal another agent (or a human) is driving,
@@ -92,4 +94,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behavior, and covers Bash/zsh hooks, Fish 4+ native OSC 133, Fish-safe sentinel fallback, and doctor
   completion tiers without conflating tiers with envelope modes.
 
-[Unreleased]: https://github.com/treeleaves30760/pairmux-skills/commits/main
+[Unreleased]: https://github.com/treeleaves30760/pairmux-skills/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/treeleaves30760/pairmux-skills/releases/tag/v0.1.0
