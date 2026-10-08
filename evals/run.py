@@ -4199,6 +4199,8 @@ def main(argv: list[str] | None = None) -> int:
     with results_path.open("w", encoding="utf-8") as results_stream:
         for scenario in scenarios:
             for repetition in range(1, args.repeat + 1):
+                episode_attempt_started_at = utc_now()
+                episode_attempt_started = time.monotonic()
                 try:
                     result = run_episode(
                         run_root=run_root,
@@ -4259,14 +4261,21 @@ def main(argv: list[str] | None = None) -> int:
                         "outcome": "failed",
                         "steps": 0,
                         "broker_policy_rejections": 0,
-                        "wall_time_seconds": 0.0,
+                        "wall_time_seconds": round(time.monotonic() - episode_attempt_started, 6),
+                        "started_at": episode_attempt_started_at,
+                        "finished_at": utc_now(),
+                        "timeout_seconds": args.timeout,
                         "failure_class": normalized_failure,
                         "agent_observed_failure_class": None,
                         "credential_injection": {
                             "method": opencode_auth_method,
                             "provider": endpoint.provider if endpoint is not None else model_provider if opencode_auth else None,
                             "verified": False,
-                            "cleanup_verified": False,
+                            "cleanup_verified": (
+                                False if normalized_failure in {
+                                    "credential_cleanup_failed", "control_cleanup_failed"
+                                } else None
+                            ),
                         },
                         "control_cleanup_failure_class": (
                             normalized_failure

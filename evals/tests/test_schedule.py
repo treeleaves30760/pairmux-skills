@@ -35,13 +35,15 @@ class ScheduleTests(unittest.TestCase):
             target.chmod(0o755)
         self.env = {"PATH": str(self.bin_dir) + os.pathsep + os.environ.get("PATH", "")}
 
-    def invoke(self, failures: list[str | None], *extra: str, safety: bool = False):
+    def invoke(self, failures: list[str | None], *extra: str, safety: bool = False, raise_runner_error: bool = False):
         calls = []
 
         def episode(**kwargs):
             index = len(calls)
             calls.append(kwargs["scenario"])
             failure = failures[index] if index < len(failures) else None
+            if raise_runner_error:
+                raise RuntimeError("synthetic episode failure")
             return {
                 "schema": runner.RESULT_SCHEMA,
                 "run_id": kwargs["run_id"],
@@ -79,6 +81,20 @@ class ScheduleTests(unittest.TestCase):
             with self.subTest(value=value), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 parser.parse_args(["--agent", "codex", "--max-capability-failures", value])
         self.assertFalse((self.root / "runs").exists())
+
+    def test_exception_result_records_elapsed_time_and_unknown_cleanup(self) -> None:
+        code, calls, summary, _ = self.invoke([], "--max-capability-failures", "2", raise_runner_error=True)
+        self.assertEqual(code, 1)
+        self.assertEqual(len(calls), 1)
+        result = summary["results"][0]
+        self.assertEqual(result["failure_class"], "runner_error")
+        self.assertGreater(result["wall_time_seconds"], 0)
+        self.assertEqual(result["timeout_seconds"], 180.0)
+        self.assertIsInstance(result["started_at"], str)
+        self.assertIsInstance(result["finished_at"], str)
+        self.assertLessEqual(result["started_at"], result["finished_at"])
+        self.assertIsNone(result["credential_injection"]["cleanup_verified"])
+        self.assertEqual(summary["stop_reason"], "runner_error")
 
     def test_historical_default_continues_capability_and_runner_failures(self) -> None:
         code, calls, summary, _ = self.invoke(["agent_failed", "runner_error", "check_failed"])
