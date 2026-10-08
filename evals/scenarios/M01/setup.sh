@@ -8,12 +8,12 @@ SCEN_DIR="${PAIRMUX_EVAL_SCENARIO_DIR:-$SCRIPT_DIR}"
 pmx_setup "$SCEN_DIR" m01
 chmod +x "$SCEN_DIR/bigserver.py" "$SCEN_DIR/slowtests.sh"
 rm -f "$SCEN_DIR"/answer-*.txt "$SCEN_DIR/server-port.txt" "$SCEN_DIR/test-report.txt" \
-  "$SCEN_DIR/DONE.txt" "$SCEN_DIR/subgoals.json" "$SCEN_DIR/noisy.log"
+  "$SCEN_DIR/DONE.txt" "$SCEN_DIR/subgoals.json" "$SCEN_DIR/noisy.log" "$SCEN_DIR/m01-events.jsonl"
 command -v python3 >/dev/null 2>&1 || echo "warning: python3 not on PATH; this scenario needs it." >&2
 command -v curl    >/dev/null 2>&1 || echo "warning: curl not on PATH; this scenario needs it." >&2
 
 # Deterministic 10k-line log with exactly one FATAL line buried at line 6437.
-python3 - "$SCEN_DIR/noisy.log" <<'PY'
+python3 -I - "$SCEN_DIR/noisy.log" <<'PY'
 import sys
 
 FATAL = "2026-08-01T03:14:07Z FATAL: disk quota exceeded on shard-17 token=FT-55d1"
@@ -24,4 +24,17 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
         else:
             handle.write(f"2026-08-01T03:{(i // 300) % 60:02d}:{i % 60:02d}Z INFO worker-{i % 7} heartbeat seq={i}\n")
 PY
-echo "M01 ready. Jobs: bigserver.py (slow boot), slowtests.sh (~20s), noisy.log (10k lines)."
+# Keep expected fixture hashes in the existing runner-owned env file, never a
+# newly agent-visible checker companion. Manual runs use that same env.sh.
+python3 -I - "$SCEN_DIR" "${PAIRMUX_EVAL_ENV_FILE:-$SCEN_DIR/env.sh}" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+hashes = {name: hashlib.sha256((root / name).read_bytes()).hexdigest()
+          for name in ("bigserver.py", "slowtests.sh", "noisy.log")}
+with open(sys.argv[2], "a", encoding="utf-8") as handle:
+    handle.write("# M01 fixture-hashes " + json.dumps(hashes, sort_keys=True) + "\n")
+PY
+echo "M01 ready. Jobs: bigserver.py (live listener approval), slowtests.sh (42 checks), noisy.log (10k lines)."

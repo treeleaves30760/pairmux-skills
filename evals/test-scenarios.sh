@@ -86,6 +86,17 @@ for scen in "${scenarios[@]}"; do
   echo "OK $scen"
 done
 
+for scen in "${scenarios[@]}"; do
+  case "$scen" in
+    M01|M03)
+      echo "== $scen: logical overlap and tamper regressions =="
+      if ! "$EVALS_DIR/scenarios/$scen/golden.sh" --self-test; then
+        failures=$((failures + 1))
+      fi
+      ;;
+  esac
+done
+
 if [ "$failures" -gt 0 ]; then
   echo "test-scenarios: $failures scenario(s) failed" >&2
   exit 1
