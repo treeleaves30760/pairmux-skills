@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Installation guidance recommends persistent `uv tool install pairmux`; the command reference
+  covers the uv-only `pairmux update` lifecycle available from pairmux v0.6.0, `E_UPDATE`, and the
+  bootstrap step for older releases. Agents must have explicit user authorization to install or
+  update rather than self-updating during terminal work.
+
 ## [0.1.0] - 2026-08-10
 
 ### Added
