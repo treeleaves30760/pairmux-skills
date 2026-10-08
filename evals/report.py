@@ -206,6 +206,8 @@ def provenance(row: dict, result: dict, summary: dict, raw: dict, context: str) 
         value = pick(field, result, summary, raw)
         if field in {"skill_tree_sha256", "skill_md_sha256"} and value == "not-installed" and row["terminal_harness"] in {"shell", "rawtmux"}:
             value = summary.get(field, MISSING)  # Compare source hashes, not baseline's absent installation.
+        if field in {"skill_tree_sha256", "skill_md_sha256"} and value == "not-installed":
+            value = MISSING  # An installation sentinel is never a source hash.
         nullable = field == "model_variant"
         if value is MISSING or (not value and not nullable):
             missing.append(field)
@@ -301,6 +303,8 @@ def observation(raw: dict, result: dict, summary: dict, context: str) -> dict:
     joined = dict(raw)
     joined.update(result)  # Actual result is authoritative for outcomes and timing.
     row = {field: joined.get(field) for field in ("run_id", "episode_id", "repeat", "pass")}
+    if row["repeat"] is not None:
+        row["repeat"] = int(row["repeat"])  # Accepted integral JSON numbers identify the same trial.
     row["scenario"] = joined.get("scenario") or "unknown"
     row["terminal_harness"] = joined.get("terminal_harness", summary.get("terminal_harness")) or "unknown"
     row["trial_id"] = joined.get("trial_id", joined.get("pairing_id", summary.get("trial_id")))
@@ -485,7 +489,8 @@ def comparisons(rows: list[dict], summarize) -> tuple[list[dict], int]:
         for left, right in itertools.combinations(harnesses, 2):
             counts = Counter()
             pairs = []
-            for trial, candidates in sorted(trials.items()):
+            pair_trials = {trial: candidates for trial, candidates in trials.items() if left in candidates or right in candidates}
+            for trial, candidates in sorted(pair_trials.items()):
                 a, b = candidates.get(left, []), candidates.get(right, [])
                 if len(a) > 1 or len(b) > 1:
                     counts["ambiguous"] += 1
@@ -504,7 +509,7 @@ def comparisons(rows: list[dict], summarize) -> tuple[list[dict], int]:
                     values = [b["measures"][field]["value"] - a["measures"][field]["value"] for _, a, b in pairs if a["measures"][field]["source"] == b["measures"][field]["source"] == source]
                     deltas[field][source] = summarize(values, len(pairs))
             output.append({"scenario": scenario, "cohort_id": cohort_id(json.loads(cohort)), "left": left, "right": right,
-                           "candidate_trials": len(trials), "matched_successful": len(pairs),
+                           "candidate_trials": len(pair_trials), "matched_successful": len(pairs),
                            "excluded": {field: counts[field] for field in ("failed", "unmatched", "ambiguous", "unknown_outcome")},
                            "pairs": [{"trial": json.loads(trial), "left": [a["run_id"], a["episode_id"]], "right": [b["run_id"], b["episode_id"]]} for trial, a, b in pairs],
                            "delta_right_minus_left": deltas})

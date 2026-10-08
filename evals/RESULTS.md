@@ -185,10 +185,12 @@ One model across three agent harnesses is not three models. These four diagnosti
 cross-terminal efficiency pairs or statistical acceptance. Formal Claude S01–S09, Codex
 S01–S06+S08 and the bounded 24-episode M calibration remain pending. All eight M fixtures now
 have passing local untouched-negative/golden checks; those are infrastructure tests, not model runs.
-Final local integration passed 151 tests (11 real-fixture tests explicitly skipped without
+Final local integration ran 155 tests (144 passed; 11 real-fixture tests explicitly skipped without
 prerequisites); those 11 separately passed with a real binary/tmux, alongside all eight goldens and
-M01/M03 three-harness overlap/tamper self-tests. ShellCheck and Python 3.9 grammar checks passed;
-actual Linux CI and Python 3.9 runtime coverage are not claimed.
+M01/M03 three-harness overlap/tamper self-tests. Reporter regressions passed 39/39; independently
+reproduced integral-trial, pair-specific denominator and missing-source-hash defects were fixed and
+rechecked. ShellCheck and Python 3.9 grammar checks passed; actual Linux CI and Python 3.9 runtime
+coverage are not claimed.
 The revised event-gated M01/M03 hashes and explicit safety-veto protocol must not be pooled with
 the historical pilot below. Documentation HTTPS and v0.6.0 publication remain pending separately.
 

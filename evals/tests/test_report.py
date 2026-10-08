@@ -170,6 +170,29 @@ class ReportTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "disagree on skill_tree_sha256"):
             self.generate(left)
 
+    def test_baseline_missing_or_sentinel_source_hash_is_unknown(self):
+        for index, source in enumerate((None, "not-installed")):
+            paths = []
+            for harness in ("shell", "rawtmux"):
+                root = self.write_run(f"source{index}-{harness}", harness, changes={"skill_tree_sha256": "not-installed", "skill_md_sha256": "not-installed"})
+                def change_source(value):
+                    for field in ("skill_tree_sha256", "skill_md_sha256"):
+                        if source is None:
+                            value.pop(field)
+                        else:
+                            value[field] = source
+                self.change_json(root / "summary.json", change_source)
+                paths.append(root)
+            data = self.generate(*paths)
+            self.assertEqual(data["comparisons"], [])
+            self.assertEqual(data["pairing_excluded_missing_provenance_or_trial"], 2)
+            for group in data["groups"]:
+                self.assertEqual(group["cohort_status"], "unknown")
+                self.assertEqual(group["cohort"]["unknown_run_id"], group["runs"][0])
+                for field in ("skill_tree_sha256", "skill_md_sha256"):
+                    self.assertIn(field, group["cohort"]["missing"])
+                    self.assertIsNone(group["cohort"][field])
+
     def test_result_only_endpoint_configuration_extensions_are_tolerated(self):
         root = self.write_run()
         result_path = root / "episodes" / "M03-r01" / "result.json"
@@ -215,6 +238,42 @@ class ReportTests(unittest.TestCase):
         pair = self.generate(left, other, right)["comparisons"][0]
         self.assertEqual(pair["matched_successful"], 0)
         self.assertEqual(pair["excluded"]["ambiguous"], 1)
+
+    def test_integral_float_repeat_pairs_with_integer_trial(self):
+        left = self.write_run("left")
+        right = self.write_run("right", "shell", changes={"repeat": 1.0})
+        rows, _, _ = report.load_observations([left, right])
+        self.assertTrue(all(type(row["repeat"]) is int for row in rows))
+        pair = self.generate(left, right)["comparisons"][0]
+        self.assertEqual(pair["candidate_trials"], 1)
+        self.assertEqual(pair["matched_successful"], 1)
+        self.assertEqual(pair["excluded"]["unmatched"], 0)
+        self.assertEqual(pair["pairs"][0]["trial"], ["repeat", 1])
+
+    def test_integral_float_duplicate_trial_is_ambiguous(self):
+        left = self.write_run("left")
+        other = self.write_run("other", changes={"repeat": 1.0})
+        right = self.write_run("right", "shell")
+        pair = self.generate(left, other, right)["comparisons"][0]
+        self.assertEqual(pair["candidate_trials"], 1)
+        self.assertEqual(pair["matched_successful"], 0)
+        self.assertEqual(pair["excluded"]["ambiguous"], 1)
+        self.assertEqual(pair["excluded"]["unmatched"], 0)
+
+    def test_third_harness_only_trial_does_not_inflate_pair_candidates(self):
+        left = self.write_run("left")
+        right = self.write_run("right", "shell")
+        third = self.write_run("third", "rawtmux", repeats=(2,))
+        comparisons = self.generate(left, right, third)["comparisons"]
+        pair = next(pair for pair in comparisons if pair["left"] == "pmx-cli" and pair["right"] == "shell")
+        self.assertEqual(pair["candidate_trials"], 1)
+        self.assertEqual(pair["matched_successful"], 1)
+        self.assertEqual(pair["excluded"]["unmatched"], 0)
+        for pair in comparisons:
+            if "rawtmux" in (pair["left"], pair["right"]):
+                self.assertEqual(pair["candidate_trials"], 2)
+                self.assertEqual(pair["matched_successful"], 0)
+                self.assertEqual(pair["excluded"]["unmatched"], 2)
 
     def test_explicit_trial_ids_disambiguate_repeat_numbers(self):
         paths = [self.write_run("a", changes={"trial_id": "trial-a"}), self.write_run("b", "shell", changes={"trial_id": "trial-a"}), self.write_run("c", changes={"trial_id": "trial-b"}), self.write_run("d", "shell", changes={"trial_id": "trial-b"})]

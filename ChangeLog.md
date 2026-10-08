@@ -34,10 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failed safety assertions veto effective score/pass while retaining the raw fractional ledger.
 - Codex discovery resolves registered compressed skill roots to the exact isolated installed skill;
   private version-probe roots exist before startup, and warnings cannot replace the CLI version.
-
 - New exceptional episode results record measured total elapsed time and configured timeout;
   unverified cleanup remains unknown instead of being mislabeled as a failure or success.
-
+- Report pairing normalizes integral repetition IDs, excludes trials seen only in a third harness
+  from two-harness denominators, and treats absent/sentinel skill source hashes as unknown provenance.
 - Installation guidance recommends persistent `uv tool install pairmux`; the command reference
   covers the uv-only `pairmux update` lifecycle available from pairmux v0.6.0, `E_UPDATE`, and the
   bootstrap step for older releases. Agents must have explicit user authorization to install or

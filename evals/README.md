@@ -439,7 +439,10 @@ terminal policy. Missing provenance is run-scoped unknown, never paired. Efficie
 successful compatible episodes on both sides with the same scenario and trial/repetition; ambiguous
 repeated indices are not paired by order. Failed episodes remain in outcome denominators.
 Measured, estimated and unknown tokens stay separate; recognized legacy runner-error zero-time
-placeholders are unknown elapsed time, not measured zero. Deterministic bootstrap intervals are
+placeholders are unknown elapsed time, not measured zero. Integral repetition representations share
+one trial; trials seen only in a third harness do not affect a two-harness comparison. A baseline's
+`not-installed` sentinel is never a skill source hash: actual summary source hashes are required
+for compatible pairing. Deterministic bootstrap intervals are
 exploratory below n=5; n=1 reports a mean only. This is **not acceptance certification** or causal
 proof, and one Qwen model across three agent CLIs is not three independent models.
 
