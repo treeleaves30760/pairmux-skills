@@ -131,6 +131,92 @@ summary, or control metadata; the runner records `isolated-auth-file-from-enviro
 the same `0600` installation and verified cleanup. The cooperative-agent boundary still applies to
 the isolated auth file and native transcript/log output.
 
+### Endpoint-only evaluation (explicit opt-in)
+
+Use a dedicated, restricted endpoint credential **only via its environment variable name**.
+The examples assume the operator has already exported `PAIRMUX_EVAL_API_KEY` privately and manages
+an SSH tunnel exposing `http://127.0.0.1:8080/v1`. Do not put a key in command arguments, URLs,
+checked-in configuration, or shell history. The approved endpoint serves `qwen3.8-27b` with a
+262144-token context window; these commands do not configure the tunnel or any host agent settings.
+
+```bash
+python3 evals/run.py --agent opencode --provider qwen --model qwen/qwen3.8-27b \
+  --endpoint-base-url http://127.0.0.1:8080/v1 --endpoint-key-env PAIRMUX_EVAL_API_KEY \
+  --endpoint-context 262144 --endpoint-max-output 4096 --scenario S01 --timeout 300 \
+  --max-capability-failures 2
+
+python3 evals/run.py --agent codex --provider qwen --model qwen3.8-27b \
+  --endpoint-base-url http://127.0.0.1:8080/v1 --endpoint-key-env PAIRMUX_EVAL_API_KEY \
+  --endpoint-effort medium --scenario S01 --timeout 300 --max-capability-failures 2
+
+python3 evals/run.py --agent claude --provider qwen --model qwen3.8-27b \
+  --endpoint-base-url http://127.0.0.1:8080/v1 --endpoint-key-env PAIRMUX_EVAL_API_KEY \
+  --discovery-timeout 300 --endpoint-max-turns 32 --scenario S01 --timeout 300 \
+  --max-capability-failures 2
+```
+
+Add `--dry-run` to inspect a plan with **zero writes, credential reads, version probes, or API calls**;
+the named credential need not exist for a dry run. Execution requires a nonempty, unpadded key.
+Endpoint mode requires explicit `--provider`, `--model`, `--endpoint-base-url`, and
+`--endpoint-key-env`; a custom provider ID such as `qwen` cannot name a built-in paid provider.
+OpenCode's model prefix must match that ID; Claude and Codex use the bare endpoint model ID.
+Paid Claude aliases/models, ambiguous URLs, userinfo, queries, fragments, and paths other than root
+or `/v1` are rejected. HTTP is loopback-only; remote URLs require HTTPS. Root and `/v1` inputs
+normalize to `/v1` for OpenCode/Codex, but to the explicit root for Claude, whose client adds
+`/v1/messages` itself. Endpoint options cannot combine with `--opencode-auth-file` or
+`--opencode-auth-env`. Without endpoint options, existing provider behavior is unchanged.
+
+Per-episode private configuration is created in the mode-0700 control HOME **before project
+preparation and discovery**, never in the agent worktree; it is removed by verified control-root
+cleanup. Configuration files are mode `0600` and contain only environment-key references, never
+key values. Every version/setup/check/project-preparation/broker environment excludes all ambient
+paid API credentials, OAuth selectors, proxy auth, and SSH agents. Only discovery and the actual
+agent receive the selected endpoint credential. Version probes have separate private CLI roots,
+created before CLI startup; Codex provenance selects the actual `codex-cli` version rather than
+an incidental warning. Codex's model-free discovery validates registered skills from the developer
+`skills_instructions` JSON block, resolving compressed `rN` skill-root aliases to the exact isolated
+`.agents/skills/pairmux/SKILL.md`. Absolute legacy registrations remain supported; unknown/duplicate
+aliases, traversal, external skill roots, and incidental/user-text path mentions fail closed.
+
+| adapter | endpoint-only protocol/configuration |
+|---|---|
+| OpenCode | `@ai-sdk/openai-compatible` chat completions; `options.baseURL` and `{env:NAME}` key reference; only the selected provider enabled; main and small model both pinned to Qwen; configured context/output limits; host model catalog not inherited |
+| Codex | private `CODEX_HOME/config.toml`; `wire_api="responses"`, environment-key reference, no OpenAI auth, reasoning effort `medium`, zero request/stream retries, bounded stream idle timeout |
+| Claude | explicit `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`, all default-model aliases and small-fast model mapped to Qwen; CLI `--model` pinned; `CLAUDE_CODE_MODEL_CAPABILITIES=-mid_conv_system,-mid_conv_tool_change`; nonessential traffic/updater disabled |
+
+`--endpoint-context` defaults to 262144 (accepted range 4096–1048576).
+`--endpoint-max-output` defaults to 4096 (128–8192 and smaller than context), enforced through
+OpenCode's model output limit and Claude's output-token environment setting. **Current Codex has
+no verified per-response output-cap setting**: its metadata records `output_limit_enforced=false`;
+the value bounds tool output only, and the runner's process timeout remains the hard limit.
+`--endpoint-effort` is Codex-only and accepts only `medium` (the endpoint rejects `max`);
+`--model-variant` retains its existing non-endpoint OpenCode meaning and is rejected in endpoint mode.
+Claude's `--endpoint-max-turns` defaults to 32 (1–64), with one turn for its discovery sentinel.
+Endpoint `--timeout` cannot exceed 600 seconds; discovery defaults to 300 seconds (1–600,
+`--discovery-timeout`), versus the historical 60-second Claude/20-second model-free defaults.
+
+Results include nonsecret `endpoint` protocol/model/provider/canonical URL/context/output/effort
+metadata, a configuration hash that never hashes the key, and `terminal_harness_policy`.
+`discovery_duration_seconds` and `agent_duration_seconds` are separate: the latter measures only
+`ProcessResult.duration_seconds`, not setup/discovery/check. Stderr detection accepts narrow
+provider/network diagnostic signatures only. Endpoint Claude uses bounded incremental JSONL decoding
+of native stdout error flags/categories/status fields (and its discovery JSON result). Endpoint
+Codex inspects only top-level native `error`/`turn.failed` message fields: its verified exact overload
+diagnostic is `provider_unavailable`, while other structurally valid terminal errors stop as
+`endpoint_infrastructure_unknown` without guessing a provider category or HTTP status. Nested model
+metadata warnings and ordinary assistant/tool/result text never match. Provider authentication,
+rate-limit, unavailable and unknown endpoint-infrastructure failures stop later episodes.
+
+Raw transcripts remain private while an episode runs. Before export, the runner scrubs literal and
+JSON-escaped endpoint-key bytes from evidence, terminal state, and worktree files, removes unsafe
+links/special/oversized artifacts, and fails closed with `endpoint_secret_leak` (stopping the schedule)
+when scrubbing/removal was necessary. Scrub failure removes unsafe output and is fatal. Exception
+and result/summary text are also scrubbed; credential variable names/values, key hashes/lengths,
+and private provider configuration paths are not endpoint metadata. This assumes **trusted fixtures
+and a cooperative same-UID agent**: the agent can inspect its own environment, and deliberately
+encoded/exfiltrated secrets require a separate UID/container/VM or egress controls, not this runner.
+CI uses mocks only; real endpoint tests must be separately authorized by the operator.
+
 The adapters deliberately use stable, non-interactive output modes:
 
 | agent | runner invocation details |
@@ -157,7 +243,20 @@ machine-log signature for provider authentication failure, exhausted rate limits
 after retries terminates the agent process group immediately and stops scheduling later episodes.
 `summary.json.schedule` records planned, completed, and skipped episodes plus the normalized stop
 reason. The partial run still fails, and P4 remains ineligible because required repetitions are
-missing. Assistant text and transcript stdout never participate in provider-failure detection.
+missing. OpenCode assistant text and transcript stdout never participate in its provider-failure
+detection; endpoint adapters additionally inspect only their typed native machine-error events.
+
+For shared-endpoint calibration, run episodes **serially** with `--max-capability-failures 2`.
+This opt-in budget counts total `agent_timeout`, `agent_failed`, `check_failed`, and
+`handoff_not_blocking` failures; a successful episode does not reset it. Infrastructure or unknown
+failed episodes stop immediately rather than consuming the capability budget. Explicit safety
+violations stop immediately even when an agent timeout is the primary failure; provider/credential
+leak stop reasons retain precedence. Without this option historical capability scheduling remains
+unbounded. The summary records the configured budget and observed capability failures; skipped
+required scenarios remain ineligible, not inferred passes. Exceptional process unwinding also
+terminates/reaps a spawned agent before control cleanup. New exception results measure total attempt
+elapsed time and record the configured timeout, leaving unavailable phase/cleanup evidence unknown;
+historical zero placeholders and artifacts are not rewritten.
 
 ### Isolation and instrumentation
 
@@ -267,35 +366,54 @@ prevents the native transcript event from flushing before timeout.
 
 Where S01–S10 ask "does the agent use pairmux correctly?", the M scenarios ask the prior question:
 **does pairmux actually help an agent in a complex multi-task terminal workload?** Each M scenario
-is a small board of concurrent jobs with 2–8 machine-checkable subgoals; episodes score
-fractionally (`score` in results), and every assertion is **harness-agnostic** — task artifacts
-only, never pairmux journals — so the same scenario runs under different terminal-control
-conditions:
+is a small board of concurrent jobs with 2–8 machine-checkable subgoals. The raw ledger mean is
+retained as `raw_subgoal_score`; failed explicitly classified `safety:` assertions (or the historical
+`secret_never_guessed` assertion) veto the effective `score` to zero and fail the episode.
+`capability:` and `admin:` detail prefixes distinguish task performance from DONE bookkeeping;
+unclassified historical assertions remain unknown rather than being relabeled. Every assertion is
+**harness-agnostic** — shared task/protocol artifacts, never a pairmux-only journal requirement —
+so the same scenario runs under different terminal-control conditions:
 
 | `--terminal-harness` | agent gets | measures |
 |---|---|---|
 | `pmx-cli` (default) | pairmux CLI + installed skill | the full ACI layer |
 | `rawtmux` | tmux + a parity cheat-sheet (`harness/TERMINAL-HOWTO.md`), pairmux hidden | the ACI's value over competent raw tmux |
-| `shell` | only the agent's own shell tool, pairmux hidden | the PTY/handoff 0-to-1 boundary |
+| `shell` | agent's own shell tool and host tmux, pairmux/skill hidden | the historical bare-shell policy, including self-assembled tmux |
+
+Host tmux remains available in all three conditions, explicitly recorded in
+`terminal_harness_policy`. Shell is **not** a no-PTY/no-tmux condition. Removing tmux would require a
+separate protocol and cannot be mixed with the historical pilot.
 
 Fairness rules: the base TASK.md is byte-identical across harnesses (rawtmux adds one pointer line,
 standing in for automatic skill discovery); the cheat-sheet teaches honest tmux best practice so
 the baseline is as strong as we can make it; both baselines hide pairmux behind a
 command-not-found stub (attempts surface in metrics as `pairmux_stub_hits`).
 
-Current scenarios (the pilot trio; M02/M04–M06/M08 are planned):
+Current scenarios (new fixture hashes identify this protocol; the historical pilot is unchanged):
 
 | # | scenario | what it measures |
 |---|----------|------------------|
-| M01 | triage board | 3 concurrent jobs: slow-boot server + readiness, ~20s test suite, needle in a 10k-line log, clean shutdown |
-| M03 | credential checkpoint | migration blocks on a password only a scripted human knows; handoff protocol + sidework must keep moving; the secret must never be issued by the agent |
+| M01 | triage board | concurrent slow server boot, 42-check suite and FATAL review; same-server logical checkpoints, one non-secret listener approval and clean shutdown |
+| M02 | interactive chain | a live REPL result, one confirmation and pager completion |
+| M03 | credential checkpoint | one human-only answer at the same echo-off foreground TTY, with both independent sideworkers progressing during handoff |
+| M04 | persistent environment | a virtualenv/environment chain in one shell, plus a separate terminal |
+| M05 | hang recovery | concurrent work, SIGINT recovery in place with the same process/session |
+| M06 | changing human priority | a private human revision and terminal note, followed in the required order |
 | M07 | long non-interactive build | the honest control: every harness should pass; only efficiency differs |
+| M08 | server lifecycle | real readiness, a client request, log readback and clean shutdown |
 
-M03's human is `human.sh`, a runner-side bot with fixed latency that answers at whatever live
-terminal the agent offers via `handoff.json` (see the scenario's `HANDOFF-PROTOCOL.md`) —
-identical behavior for every harness.
+M01 proves overlap using fixture events rather than a machine-speed deadline. M03's runner-side
+`human.sh` waits at a logical handoff checkpoint until **both** sideworkers complete their second
+real work batch, then answers the offered live credential prompt once and confirms recovery. The
+same rule applies to every harness; a missed checkpoint is not a safety pass. See its
+`HANDOFF-PROTOCOL.md`. This replaces fixed-latency behavior for new runs only. M02 validates
+computed integer data flow through variables as well as literal multiplication, never evaluating
+transcript source in the checker. M04's supplied activation adds a transparent source/export observer:
+activate first, then issue the ordinary TOKEN export in a separate shell command, exactly once.
+Subsequent identity checks prove the same shell retained that state; repeated setup fails. These
+source-hashed protocols and task instructions are identical across terminal harnesses.
 
-Run them like any scenario (`--scenario M01-M07 --terminal-harness rawtmux`), then extract
+Run them like any scenario (`--scenario M01-M08 --terminal-harness rawtmux`), then extract
 efficiency metrics:
 
 ```bash
@@ -305,13 +423,37 @@ python3 evals/metrics.py evals/runs/<run-id>
 writes `metrics.jsonl` + `metrics.md` per run: fractional score, wall time, tool calls, token
 usage (real when the agent CLI reports it, `~`-flagged chars/4 estimate otherwise), and
 anti-patterns (`sleep` calls, duplicate commands, capture-pane volume, pairmux stub hits).
+The legacy per-run Markdown is a quick view, not a provenance-compatible efficiency comparison;
+use the multi-run reporter below to keep token sources and unknown observations separate.
+
+Merge compatible runs with the stdlib-only descriptive reporter:
+
+```bash
+python3 evals/report.py evals/runs/<pmx-run> evals/runs/<tmux-run> evals/runs/<shell-run> \
+  --seed 42 --output /tmp/calibration.md --json-output /tmp/calibration.json
+```
+
+It deduplicates `(run_id, episode_id)` and rejects conflicting duplicates. Cohorts separate
+agent/version, recorded model/provider/endpoint protocol, fixture/skill/binary hashes, timeout and
+terminal policy. Missing provenance is run-scoped unknown, never paired. Efficiency pairs require
+successful compatible episodes on both sides with the same scenario and trial/repetition; ambiguous
+repeated indices are not paired by order. Failed episodes remain in outcome denominators.
+Measured, estimated and unknown tokens stay separate; recognized legacy runner-error zero-time
+placeholders are unknown elapsed time, not measured zero. Deterministic bootstrap intervals are
+exploratory below n=5; n=1 reports a mean only. This is **not acceptance certification** or causal
+proof, and one Qwen model across three agent CLIs is not three independent models.
 
 Infrastructure self-test — zero model cost; validates that fixtures, `check.sh`, and the
 reference `golden.sh` solutions agree (goldens are control-plane files agents never see):
 
 ```bash
-./evals/test-scenarios.sh          # all M scenarios, EVAL_TIME_SCALE=0.15
+PAIRMUX_REAL_BIN=/absolute/path/to/pairmux ./evals/test-scenarios.sh
+# all eight M scenarios, EVAL_TIME_SCALE=0.15; M01/M03 also run overlap/tamper self-tests
 ```
+
+The focused new-fixture integration tests require explicit executable `PAIRMUX_REAL_BIN`, real
+`tmux`/`curl` and an available zsh or bash. Without those prerequisites they clearly skip, while
+mock runner/reporter contracts still run. They never substitute a mock for a real PTY pass.
 
 ## Harness tests
 
@@ -320,8 +462,10 @@ tokens and does not need credentials:
 
 ```bash
 python3 -m unittest discover -s evals/tests -v
-bash -n evals/lib.sh evals/scenarios/*/{setup,check}.sh
-shellcheck evals/lib.sh evals/scenarios/*/{setup,check}.sh
+for file in evals/lib.sh evals/test-scenarios.sh evals/scenarios/*/*.sh; do
+  bash -n "$file"
+done
+shellcheck evals/lib.sh evals/test-scenarios.sh evals/scenarios/*/*.sh
 ```
 
 ## Scoring

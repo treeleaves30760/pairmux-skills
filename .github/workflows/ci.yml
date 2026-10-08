@@ -14,13 +14,19 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Compile Python sources
-        run: python3 -m py_compile evals/run.py evals/pairmux_proxy.py evals/tests/mock_bin.py
+        run: |
+          for file in evals/*.py evals/tests/*.py evals/scenarios/*/*.py; do
+            python3 -m py_compile "$file"
+          done
       - name: Run model-free harness tests
         run: python3 -m unittest discover -s evals/tests -v
       - name: Validate scenario shell
-        run: bash -n evals/lib.sh evals/scenarios/*/setup.sh evals/scenarios/*/check.sh
+        run: |
+          for file in evals/lib.sh evals/test-scenarios.sh evals/scenarios/*/*.sh; do
+            bash -n "$file"
+          done
       - name: Lint scenario shell
-        run: shellcheck evals/lib.sh evals/scenarios/*/setup.sh evals/scenarios/*/check.sh
+        run: shellcheck evals/lib.sh evals/test-scenarios.sh evals/scenarios/*/*.sh
 
   commit-policy:
     runs-on: ubuntu-latest

@@ -7,7 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Isolated endpoint-only eval configuration for OpenCode chat completions, Claude Messages,
+  and Codex Responses, with explicit provider/model selection, credential-free control processes,
+  private runtime provider settings, bounded requests, fatal infrastructure stops and secret-scrubbed
+  artifacts. Endpoint, terminal-policy and separate discovery/agent timing provenance are recorded;
+  Codex's unverified generated-output cap is explicitly reported as unenforced.
+- Opt-in total capability-failure budgets for serial calibration, immediate safety/infrastructure
+  stops, typed Claude/Codex machine diagnostics and exceptional child-process reaping.
+- Harness-neutral M02/M04/M05/M06/M08 fixtures for interactive chaining, persistent environment,
+  in-place SIGINT recovery, human priority revisions and real server lifecycle, with zero-model
+  golden/negative tests and explicit real-tmux/binary prerequisites for integration tests.
+- A stdlib-only multi-run descriptive reporter with deterministic bootstrap, compatible successful
+  pairing, provenance-separated cohorts, deduplication and separate measured/estimated/unknown
+  token and timing observations; n=1 is exploratory mean-only, never acceptance certification.
+
 ### Changed
+
+- M01/M03 use task-relevant logical overlap checkpoints, preserving existing subgoal IDs while new
+  fixture hashes identify the protocol. M03 requires both sideworkers to progress before one human
+  answer at the same foreground echo-off TTY. Historical pilot data remains unchanged.
+- M02 accepts equivalent variable-based live REPL computations without executing transcript input;
+  M04 observes once-only activation/export across subsequent commands instead of accepting repeated setup.
+- Explicit `capability:`, `admin:` and `safety:` subgoal details separate performance/bookkeeping;
+  failed safety assertions veto effective score/pass while retaining the raw fractional ledger.
+- Codex discovery resolves registered compressed skill roots to the exact isolated installed skill;
+  private version-probe roots exist before startup, and warnings cannot replace the CLI version.
+
+- New exceptional episode results record measured total elapsed time and configured timeout;
+  unverified cleanup remains unknown instead of being mislabeled as a failure or success.
 
 - Installation guidance recommends persistent `uv tool install pairmux`; the command reference
   covers the uv-only `pairmux update` lifecycle available from pairmux v0.6.0, `E_UPDATE`, and the
