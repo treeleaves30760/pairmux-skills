@@ -198,8 +198,74 @@ and all eight real goldens plus M01/M03 overlap/tamper self-tests passed again w
 Actual Python 3.9 runtime coverage is not claimed.
 The revised event-gated M01/M03 hashes and explicit safety-veto protocol must not be pooled with
 the historical pilot below. Documentation HTTPS was completed by the operator on 2026-10-09;
-a public HTTPS read of the Getting Started page succeeded. v0.6.0 publication remains pending
-separately.
+a public HTTPS read of the Getting Started page succeeded. At that diagnostic checkpoint,
+v0.6.0 publication remained pending; the completed release is recorded below.
+
+### 2026-10-10 — clean-checkout Qwen P4 attempt, stopped at the failure budget
+
+Core pairmux v0.6.0 was published once from `8717fa1e6399e188e16d8f51febcedb7bc550973`:
+[Release 37949714403](https://github.com/treeleaves30760/pairmux/actions/runs/37949714403)
+and all six actual public-installation jobs in
+[acceptance 37950571238](https://github.com/treeleaves30760/pairmux/actions/runs/37950571238)
+succeeded. Documentation follow-up [PR #9](https://github.com/treeleaves30760/pairmux/pull/9)
+merged at `dc23e7f`; main CI `37956889652`, Docs deployment `37956889682` and public HTTPS
+changelog verification passed. These are release/platform results, not model acceptance.
+
+The operator explicitly authorized bounded readiness and a serial 16-S/24-M schedule on the
+free Brandy `qwen3.8-27b` endpoint. A new owned tunnel used the existing trusted route with
+recorded host keys and strict, noninteractive verification. Seven serial HTTP-200 readiness
+requests proved model listing and tool-call/result round trips for Messages, Responses with
+`medium` effort, and chat completions. No retry, paid fallback or global configuration change
+was used. Native protocol readiness is not proof of agent CLI acceptance.
+
+Claude Code `2.1.295` then ran S01–S09 once with explicit provider/model and
+`--acceptance-profile p4`, a clean/stable skills checkout
+`263c49634160eeff225b854bc37eabe1f6e9eb43`, and the verified public 0.6.0 Darwin ARM64
+binary (identical native/wheel SHA256
+`857eab2ab3977e0c6c00a186e7a9db159f9d83a8e7bafca687cc52e8be6c9c71`).
+Run `20261009T163301.099265Z-71610-e1b9829e` is named by its UTC start; this dated entry
+uses the operator's local date. Canonical skill tree SHA256:
+`2c246ff16138edce0e6246204bb3e81204587a7064b21657bbf8ac8b5956ff9b`;
+SKILL.md: `af5225b7ee92ed15bddd82976e628e01a78cd4c431160a914339aec9169e824c`.
+Total run wall time was 1987.383 seconds. Per-episode agent timeout was 300 seconds,
+discovery timeout 300 seconds, output cap 4096 tokens, and turn cap 32. Each episode
+isolated its work/skill, HOME, provider settings and terminal endpoint.
+
+| scenario | outcome | executed pairmux calls | total wall / discovery / agent time (seconds) |
+|---|---|---:|---|
+| S01 | pass | 5 | 152.631 / 6.871 / 144.418 |
+| S02 | pass | 4 | 130.806 / 7.191 / 121.983 |
+| S03 | pass | 5 | 186.924 / 6.738 / 178.704 |
+| S04 | fail: `agent_timeout` | 4 | 312.439 / 9.617 / 300.059 |
+| S05 | pass: expected human handoff | 5 | 312.417 / 10.320 / 300.119 |
+| S06 | pass | 10 | 205.005 / 6.087 / 197.075 |
+| S07 | pass | 6 | 169.875 / 8.193 / 158.774 |
+| S08 | pass | 7 | 204.358 / 6.226 / 196.409 |
+| S09 | fail: `agent_timeout` | 10 | 312.088 / 6.890 / 300.093 |
+
+**7/9 passed; P4 remains ineligible.** The original S04/S09 failure classes and raw evidence
+are preserved. S04's checker found the confirmation unanswered; S09's checker could not prove
+completed in-place C-c/recovery. Native S04 events also recorded Bash permission denials;
+these observations do not isolate a model-only cause, and no permissions were weakened.
+S05 passed the runner's expected, live-bound human-handoff criterion at the deadline; it is
+not a claim that an agent supplied a credential or finished the protected command.
+
+The second recorded capability-class failure exhausted the **total budget of two across the
+entire schedule**. Successes and later invocations do not reset it. The controller stopped
+with `capability_failure_limit`; Codex's seven formal episodes and all 24 M episodes were
+**not started**, not failed or passed. No automatic retry or additional readiness request followed.
+The owned tunnel closed successfully and observed owned controller/agent processes exited;
+all nine recorded terminal endpoints were separately verified absent afterward.
+All nine episode results recorded verified credential cleanup with no control-cleanup failure;
+private evidence was secret-scanned and 303 original files were copied byte-for-byte into
+ignored `evals/runs/<run-id>` storage. Historical runs and pilot denominators are unchanged.
+
+A descriptive multi-run report contains only these nine Claude/pmx-cli observations, no
+cross-terminal pairs and no M-suite result. n=1 scenario means do not establish H1–H4,
+causal efficiency, or statistical acceptance. Stable-source regression verification passed
+144/155 tests with 11 explicit prerequisite skips; those 11 separately passed against the
+public binary, alongside all eight untouched negatives/goldens and M01/M03 overlap/tamper
+self-tests. Local regression passes are not substituted for model outcomes.
 
 ## Headless acceptance status (P4 exit criteria)
 
