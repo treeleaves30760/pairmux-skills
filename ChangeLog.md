@@ -38,6 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unverified cleanup remains unknown instead of being mislabeled as a failure or success.
 - Report pairing normalizes integral repetition IDs, excludes trials seen only in a third harness
   from two-harness denominators, and treats absent/sentinel skill source hashes as unknown provenance.
+- M-suite self-test cleanup uses explicit guards compatible with Linux CI's ShellCheck, preserving
+  owned socket/PID cleanup and ignored termination failures.
 - Installation guidance recommends persistent `uv tool install pairmux`; the command reference
   covers the uv-only `pairmux update` lifecycle available from pairmux v0.6.0, `E_UPDATE`, and the
   bootstrap step for older releases. Agents must have explicit user authorization to install or
