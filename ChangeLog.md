@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Dated clean-checkout Qwen P4 evidence with the verified public pairmux 0.6.0 binary: Claude
+  S01–S09 passed 7/9, remained ineligible and stopped at the total two-failure budget. Codex's
+  seven episodes and the 24-episode M calibration were not started; historical raw runs remain unchanged.
 - Isolated endpoint-only eval configuration for OpenCode chat completions, Claude Messages,
   and Codex Responses, with explicit provider/model selection, credential-free control processes,
   private runtime provider settings, bounded requests, fatal infrastructure stops and secret-scrubbed
@@ -25,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Preserve the historical prepublication checkpoint while recording completed v0.6.0 publication,
+  actual public-platform acceptance and documentation deployment separately from model results.
 - M01/M03 use task-relevant logical overlap checkpoints, preserving existing subgoal IDs while new
   fixture hashes identify the protocol. M03 requires both sideworkers to progress before one human
   answer at the same foreground echo-off TTY. Historical pilot data remains unchanged.
