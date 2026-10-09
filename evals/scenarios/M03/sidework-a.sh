@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
-# M03 fixture: independent job A (~12s at scale 1). Must also be completed.
+# M03 fixture: reindex twelve shards, including real work during human handoff.
 set -euo pipefail
-scale="${EVAL_TIME_SCALE:-1}"
-step=$(python3 -c "print(max(0.05, 12 * float('$scale')))")
-printf 'start=%s\n' "$(date +%s)" >sidework-a.txt
-echo "sidework A: reindexing search shards ..."
-sleep "$step"
-printf 'SIDEWORK-A COMPLETE token=SA-31ab end=%s\n' "$(date +%s)" >>sidework-a.txt
-echo "sidework A done"
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec "$here/fake-sudo-migrate.sh" --sidework a

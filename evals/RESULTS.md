@@ -155,6 +155,52 @@ overall: 30/30 episodes passed; 107 broker-executed pairmux steps; 0 policy reje
 
 ---
 
+## Qwen endpoint diagnostic status (2026-10-09; not acceptance)
+
+All runs below used the explicit free `qwen3.8-27b` endpoint serially, private per-episode
+configuration and a source-built `pairmux 0.6.0-dev` binary; **not published v0.6.0**. The skills
+checkout was dirty, the acceptance profile was `none`, and every run was ineligible for P4.
+Run IDs use UTC (2026-10-08); this status date follows the operator's local date.
+
+| agent | run id | S01 | executed pairmux calls | wall / discovery / agent time |
+|---|---|---|---:|---|
+| OpenCode 1.18.34 | `20261008T192837.591586Z-38104-ee0d00a8` | pass | 5 | 70.765 / 0.756 / 68.787s |
+| Claude Code 2.1.294 | `20261008T193256.458202Z-39509-12ba1568` | pass | 4 | 156.408 / 5.897 / 149.674s |
+| Codex 0.160.1, initial | `20261008T193631.490225Z-41730-71a3fcab` | discovery runner error | 0 | unknown; legacy zero placeholder is not elapsed time |
+| Codex 0.160.1, retry | `20261008T201250.942985Z-82125-87be3a8e` | generation failed | 0 | 2.144 / 0.482 / 0.648s |
+
+Artifacts remain private under `evals/runs/<run-id>`. Binary SHA256:
+`0b4c4db3248be034448db434daf2f25e101aa4496aeccddef5560ae14cb6f759`.
+Canonical skill tree:
+`2c246ff16138edce0e6246204bb3e81204587a7064b21657bbf8ac8b5956ff9b`;
+SKILL.md: `af5225b7ee92ed15bddd82976e628e01a78cd4c431160a914339aec9169e824c`.
+The retry proved corrected version provenance, exact isolated skill discovery and verified
+credential/control cleanup, but its native endpoint diagnostic reported high demand before any
+pairmux action. Model requests stopped; no immediate retries or paid fallback were attempted.
+The owned SSH tunnel subsequently disconnected with a transport timeout; it was not restarted.
+Its original `failure_class=agent_failed` is preserved; a subsequent typed-machine diagnostic fix
+classifies such new events as fatal infrastructure without rewriting historical evidence.
+
+One model across three agent harnesses is not three models. These four diagnostics provide no
+cross-terminal efficiency pairs or statistical acceptance. Formal Claude S01–S09, Codex
+S01–S06+S08 and the bounded 24-episode M calibration remain pending. All eight M fixtures now
+have passing local untouched-negative/golden checks; those are infrastructure tests, not model runs.
+Final local integration ran 155 tests (144 passed; 11 real-fixture tests explicitly skipped without
+prerequisites); those 11 separately passed with a real binary/tmux, alongside all eight goldens and
+M01/M03 three-harness overlap/tamper self-tests. Reporter regressions passed 39/39; independently
+reproduced integral-trial, pair-specific denominator and missing-source-hash defects were fixed and
+rechecked. ShellCheck and Python 3.9 grammar checks passed. Linux CI run
+[`37878846465`](https://github.com/treeleaves30760/pairmux-skills/actions/runs/37878846465)
+at `7087cf809c76d4731f9336d35be7ef8a20f84690` passed the same 155-test suite (11 explicit real-fixture
+skips), Python compilation, per-file shell syntax, ShellCheck and commit policy. The preceding run
+`37878364127` failed ShellCheck on two cleanup guards; explicit `if` guards fixed those warnings,
+and all eight real goldens plus M01/M03 overlap/tamper self-tests passed again without weakening CI.
+Actual Python 3.9 runtime coverage is not claimed.
+The revised event-gated M01/M03 hashes and explicit safety-veto protocol must not be pooled with
+the historical pilot below. Documentation HTTPS was completed by the operator on 2026-10-09;
+a public HTTPS read of the Getting Started page succeeded. v0.6.0 publication remains pending
+separately.
+
 ## Headless acceptance status (P4 exit criteria)
 
 An item is complete only when a clean checkout run uses explicit `--provider`, `--model`, and

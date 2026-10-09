@@ -41,13 +41,17 @@ for scen in "${scenarios[@]}"; do
     if [ -f "$scendir/env.sh" ]; then
       # shellcheck source=/dev/null
       sock="$(. "$scendir/env.sh" >/dev/null 2>&1; printf '%s' "${PAIRMUX_SOCKET:-}")"
-      [ -n "$sock" ] && tmux -L "$sock" kill-server >/dev/null 2>&1 || true
+      if [ -n "$sock" ]; then
+        tmux -L "$sock" kill-server >/dev/null 2>&1 || true
+      fi
     fi
     if [ -f "$scendir/.mig-config" ]; then
       # shellcheck source=/dev/null
       mig="$(. "$scendir/.mig-config" >/dev/null 2>&1; printf '%s' "${MIG_TMP:-}")"
       if [ -n "$mig" ] && [ -d "$mig" ]; then
-        [ -f "$mig/human.pid" ] && kill "$(cat "$mig/human.pid")" 2>/dev/null || true
+        if [ -f "$mig/human.pid" ]; then
+          kill "$(cat "$mig/human.pid")" 2>/dev/null || true
+        fi
         rm -rf "$mig"
       fi
     fi
@@ -84,6 +88,17 @@ for scen in "${scenarios[@]}"; do
   cleanup_scenario
   rm -rf "$tmp"
   echo "OK $scen"
+done
+
+for scen in "${scenarios[@]}"; do
+  case "$scen" in
+    M01|M03)
+      echo "== $scen: logical overlap and tamper regressions =="
+      if ! "$EVALS_DIR/scenarios/$scen/golden.sh" --self-test; then
+        failures=$((failures + 1))
+      fi
+      ;;
+  esac
 done
 
 if [ "$failures" -gt 0 ]; then

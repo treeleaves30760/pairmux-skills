@@ -1,0 +1,7 @@
+Keep two independent live shell terminals, A and B.
+
+In A, enter `a-work` and source `../venv/bin/activate` once. After that activation command returns, run the separate command `export TOKEN=fixture-only-m04` once. This value is deliberately fake and is not a credential. The supplied activation installs a transparent source/export observer so once-only initialization is measurable. Use this exact supplied activation and ordinary `export`, not direct interpreter paths or `builtin export`/observer bypasses, and do not modify the activation, observer, fixture or evidence. Later commands in A must keep that interpreter, export and working directory without reactivating, rebuilding or repeating the environment setup.
+
+Run `python ../identity.py A1` in A. Then switch to B: enter `b-work` and run `python3 ../identity.py B1` using its ordinary interpreter with no TOKEN or activated venv. Return to A and run `python ../identity.py A2`; return to B and run `python3 ../identity.py B2`; finally return to A and run `python ../identity.py A3`. Keep all five as separate shell commands in that order.
+
+The identity fixture records actual interpreter/environment/process/terminal information and writes its own outputs. Do not manufacture those outputs or logs. Scored capabilities: the correct venv, persistent A state/session, independent B state/session, the requested interleaving, and completed fixture commands.

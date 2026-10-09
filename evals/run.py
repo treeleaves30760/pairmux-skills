@@ -10,6 +10,7 @@ import datetime as dt
 from dataclasses import dataclass
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -27,6 +28,7 @@ import time
 import traceback
 import uuid
 from collections.abc import Callable
+from urllib.parse import urlsplit, urlunsplit
 
 
 EVALS_DIR = Path(__file__).resolve().parent
@@ -41,8 +43,33 @@ BROKER_RESPONSE_SCHEMA = "pairmux.eval.exec-result.v1"
 BROKER_REJECTION_SCHEMA = "pairmux.eval.rejection.v1"
 BROKER_MAX_FRAME_BYTES = 32 * 1024
 EARLY_FAILURE_TAIL_BYTES = 64 * 1024
+ENDPOINT_DIAGNOSTIC_MAX_BYTES = 64 * 1024
 OPENCODE_AUTH_MAX_BYTES = 1024 * 1024
 OPENCODE_AUTH_ENV_BY_PROVIDER = {"huggingface": "HF_TOKEN"}
+ENDPOINT_CONTEXT_TOKENS = 262_144
+ENDPOINT_MAX_OUTPUT_TOKENS = 4_096
+ENDPOINT_OPERATION_TIMEOUT_SECONDS = 600.0
+ENDPOINT_DISCOVERY_TIMEOUT_SECONDS = 300.0
+ENDPOINT_ARTIFACT_MAX_BYTES = 64 * 1024 * 1024
+# Custom IDs cannot reuse built-in commercial providers or their credential paths.
+ENDPOINT_RESERVED_PROVIDERS = frozenset(
+    {
+        "openai", "anthropic", "opencode", "openrouter", "azure", "azure-openai",
+        "google", "google-vertex", "vertexai", "amazon-bedrock", "bedrock",
+        "github-copilot", "github-copilot-enterprise", "huggingface", "xai",
+        "groq", "deepseek", "mistral", "cohere", "togetherai", "fireworks-ai",
+    }
+)
+ENDPOINT_PAID_HOSTS = (
+    "api.openai.com", "api.anthropic.com", "openrouter.ai", "opencode.ai",
+    "generativelanguage.googleapis.com", "aiplatform.googleapis.com",
+)
+ENDPOINT_SAFE_ENV_NAMES = frozenset(
+    {
+        "PATH", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "LC_CTYPE", "TERM",
+        "COLORTERM", "NO_COLOR", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+    }
+)
 MAX_GO_DURATION_NANOSECONDS = 1 << 63
 MIN_DURABLE_HUMAN_WAIT_NANOSECONDS = 300_000_000_000
 GO_DURATION_COMPONENT = re.compile(
@@ -68,7 +95,14 @@ RUN_FATAL_FAILURE_CLASSES = frozenset(
         "provider_auth_failed",
         "provider_rate_limited",
         "provider_unavailable",
+        "endpoint_secret_leak",
+        "endpoint_artifact_sanitization_failed",
+        "endpoint_configuration_failed",
+        "endpoint_infrastructure_unknown",
     }
+)
+CAPABILITY_FAILURE_CLASSES = frozenset(
+    {"agent_timeout", "agent_failed", "check_failed", "handoff_not_blocking"}
 )
 SKILL_DISCOVERY_PATHS = {
     "opencode": Path(".config/opencode/skills/pairmux"),
@@ -89,10 +123,99 @@ RAWTMUX_TASK_SUFFIX = (
 PAIRMUX_STUB = "#!/bin/sh\necho \"pairmux: command not found\" >&2\nexit 127\n"
 
 
-class EpisodeCleanupError(RuntimeError):
+class EpisodeFailureError(RuntimeError):
     def __init__(self, failure_class: str):
-        super().__init__(f"episode cleanup failed: {failure_class}")
+        super().__init__(f"episode failed: {failure_class}")
         self.failure_class = failure_class
+
+
+class EpisodeCleanupError(EpisodeFailureError):
+    def __init__(self, failure_class: str):
+        super().__init__(failure_class)
+        self.args = (f"episode cleanup failed: {failure_class}",)
+
+
+@dataclass(frozen=True)
+class EndpointOptions:
+    agent: str
+    base_url: str
+    key_env: str
+    provider: str
+    model: str
+    context_tokens: int = ENDPOINT_CONTEXT_TOKENS
+    max_output_tokens: int = ENDPOINT_MAX_OUTPUT_TOKENS
+    effort: str | None = None
+    max_turns: int = 32
+    discovery_timeout: float = ENDPOINT_DISCOVERY_TIMEOUT_SECONDS
+
+    @property
+    def protocol(self) -> str:
+        return {
+            "opencode": "chat-completions", "codex": "responses", "claude": "messages",
+        }[self.agent]
+
+    def metadata(self) -> dict[str, object]:
+        # Deliberately exclude the credential variable name and private file path.
+        return {
+            "base_url": self.base_url,
+            "provider": self.provider,
+            "model": self.model,
+            "protocol": self.protocol,
+            "context_tokens": self.context_tokens,
+            "max_output_tokens": self.max_output_tokens,
+            "effort": self.effort,
+            "output_limit_enforced": self.agent != "codex",
+        }
+
+
+class EndpointSecret:
+    """Runtime-only key holder. Its representation never contains key material."""
+
+    __slots__ = ("_name", "_value")
+
+    def __init__(self, source: dict[str, str], environment_name: str):
+        value = source.get(environment_name)
+        if not value or value != value.strip() or any(ord(char) < 33 for char in value):
+            raise ValueError("endpoint credential environment variable is missing, empty, or invalid")
+        self._name = environment_name
+        self._value = value
+
+    def __repr__(self) -> str:
+        return "EndpointSecret(<redacted>)"
+
+    __str__ = __repr__
+
+    def inject(self, env: dict[str, str], agent: str) -> dict[str, str]:
+        injected = env.copy()
+        injected[self._name] = self._value
+        if agent == "claude":
+            injected["ANTHROPIC_API_KEY"] = self._value
+        return injected
+
+    def scrub(self, content: bytes) -> bytes:
+        # Also remove JSON-escaped key bytes from native JSON/JSONL transcripts.
+        for value in {
+            self._value,
+            json.dumps(self._value, ensure_ascii=True)[1:-1],
+            json.dumps(self._value, ensure_ascii=False)[1:-1],
+        }:
+            content = content.replace(value.encode("utf-8"), b"[REDACTED_ENDPOINT_KEY]")
+        return content
+
+    def scrub_text(self, text: str) -> str:
+        return self.scrub(text.encode("utf-8", errors="replace")).decode("utf-8")
+
+    def scrub_payload(self, payload: object) -> object:
+        if isinstance(payload, str):
+            return self.scrub_text(payload)
+        if isinstance(payload, dict):
+            return {
+                self.scrub_text(key) if isinstance(key, str) else key: self.scrub_payload(value)
+                for key, value in payload.items()
+            }
+        if isinstance(payload, (list, tuple)):
+            return [self.scrub_payload(value) for value in payload]
+        return payload
 
 
 GENERATED_NAMES = {
@@ -166,6 +289,140 @@ def non_empty_text(value: str) -> str:
     return parsed
 
 
+def normalize_endpoint_url(value: str, agent: str) -> str:
+    """Accept only a non-authenticated API root; never echo an invalid URL."""
+    if value != value.strip() or re.search(r"[\s\\\x00-\x1f\x7f%]", value):
+        raise ValueError("--endpoint-base-url must be a plain http(s) API root")
+    try:
+        parsed = urlsplit(value)
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        raise ValueError("--endpoint-base-url is invalid") from None
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not host
+        or parsed.username is not None
+        or parsed.password is not None
+        or "?" in value
+        or "#" in value
+        or parsed.path not in {"", "/", "/v1", "/v1/"}
+        or (port is not None and not 1 <= port <= 65535)
+    ):
+        raise ValueError("--endpoint-base-url must have no auth, query, fragment, or non-API path")
+    host = host.lower()
+    if (
+        not re.fullmatch(r"(?:[a-z0-9][a-z0-9.:-]*|::1)", host)
+        or host.endswith(".")
+    ):
+        raise ValueError("--endpoint-base-url hostname is invalid")
+    if any(host == paid or host.endswith("." + paid) for paid in ENDPOINT_PAID_HOSTS):
+        raise ValueError("--endpoint-base-url must not target a built-in paid provider")
+    if host.endswith((".openai.azure.com", ".api.aws", ".amazonaws.com")):
+        raise ValueError("--endpoint-base-url must not target a built-in paid provider")
+    if parsed.scheme == "http" and host not in {"localhost", "127.0.0.1", "::1"}:
+        raise ValueError("plaintext endpoints are permitted only on loopback; use HTTPS or an SSH tunnel")
+    authority = f"[{host}]" if ":" in host else host
+    if port is not None and port != (443 if parsed.scheme == "https" else 80):
+        authority += f":{port}"
+    # Anthropic clients append /v1/messages themselves: pass their explicit root.
+    path = "" if agent == "claude" else "/v1"
+    return urlunsplit((parsed.scheme, authority, path, "", ""))
+
+
+def endpoint_options(args: argparse.Namespace) -> EndpointOptions | None:
+    option_names = (
+        "endpoint_key_env", "endpoint_context", "endpoint_max_output",
+        "endpoint_effort", "endpoint_max_turns",
+    )
+    if args.endpoint_base_url is None:
+        if any(getattr(args, name) is not None for name in option_names):
+            raise ValueError("endpoint options require --endpoint-base-url")
+        return None
+    if args.opencode_auth_file is not None or args.opencode_auth_env is not None:
+        raise ValueError("endpoint mode cannot be combined with OpenCode auth-file/env injection")
+    if not args.model or not args.provider or not args.endpoint_key_env:
+        raise ValueError("endpoint mode requires explicit --model, --provider, and --endpoint-key-env")
+    if not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", args.provider):
+        raise ValueError("endpoint --provider must be a custom lowercase provider identifier")
+    if args.provider in ENDPOINT_RESERVED_PROVIDERS:
+        raise ValueError("endpoint mode requires a custom provider, not a built-in paid provider")
+    key_name = args.endpoint_key_env
+    if (
+        not re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", key_name)
+        or key_name in ENDPOINT_SAFE_ENV_NAMES
+        or key_name in {"HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_HOME"}
+        or key_name in {
+            "BASH_ENV", "ENV", "ZDOTDIR", "SHELL", "PYTHONPATH", "PYTHONHOME",
+            "NODE_OPTIONS", "NODE_PATH", "LD_PRELOAD", "LD_LIBRARY_PATH",
+            "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "SSH_AUTH_SOCK",
+            "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+        }
+        or key_name.startswith(("XDG_", "OPENCODE_", "PAIRMUX_MOCK_"))
+        or key_name in {
+            "ANTHROPIC_MODEL", "ANTHROPIC_BASE_URL", "ANTHROPIC_SMALL_FAST_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL", "API_TIMEOUT_MS",
+            "CLAUDE_CODE_MAX_OUTPUT_TOKENS", "CLAUDE_CODE_MODEL_CAPABILITIES",
+        }
+    ):
+        raise ValueError("--endpoint-key-env must be a non-conflicting environment variable NAME, not a value")
+    if key_name.startswith("CLAUDE_") or key_name.startswith("ANTHROPIC_") and key_name != "ANTHROPIC_API_KEY":
+        raise ValueError("--endpoint-key-env must not be a Claude routing or alternate-auth variable")
+    model = args.model
+    if args.agent == "opencode":
+        if not model.startswith(args.provider + "/"):
+            raise ValueError("endpoint OpenCode --model must match the explicit provider prefix")
+        model = model.split("/", 1)[1]
+    if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]*(?:/[a-zA-Z0-9][a-zA-Z0-9._-]*)*", model):
+        raise ValueError("endpoint model identifier is invalid")
+    if model.split("/", 1)[0].lower() in ENDPOINT_RESERVED_PROVIDERS or re.match(
+        r"(?i)(?:default|opus|sonnet|haiku|fable|claude|gpt|o[134])(?:$|[-/.])", model
+    ):
+        raise ValueError("endpoint mode must use the endpoint model ID, never a paid model or alias")
+    context = args.endpoint_context or ENDPOINT_CONTEXT_TOKENS
+    output = args.endpoint_max_output or ENDPOINT_MAX_OUTPUT_TOKENS
+    if not 4096 <= context <= 1_048_576:
+        raise ValueError("--endpoint-context must be between 4096 and 1048576 tokens")
+    if not 128 <= output <= 8192 or output >= context:
+        raise ValueError("--endpoint-max-output must be 128..8192 tokens and less than context")
+    if not math.isfinite(args.timeout) or args.timeout > ENDPOINT_OPERATION_TIMEOUT_SECONDS:
+        raise ValueError("endpoint --timeout must be at most 600 seconds")
+    discovery_timeout = args.discovery_timeout or ENDPOINT_DISCOVERY_TIMEOUT_SECONDS
+    if not math.isfinite(discovery_timeout) or not 1 <= discovery_timeout <= 600:
+        raise ValueError("endpoint --discovery-timeout must be 1..600 seconds")
+    if args.endpoint_effort is not None and args.agent != "codex":
+        raise ValueError("--endpoint-effort is supported only for endpoint Codex")
+    if args.model_variant:
+        raise ValueError("endpoint mode does not use --model-variant; Codex uses --endpoint-effort medium")
+    max_turns = args.endpoint_max_turns or 32
+    if args.endpoint_max_turns is not None and args.agent != "claude":
+        raise ValueError("--endpoint-max-turns is supported only for endpoint Claude")
+    if max_turns > 64:
+        raise ValueError("--endpoint-max-turns must be at most 64")
+    return EndpointOptions(
+        agent=args.agent,
+        base_url=normalize_endpoint_url(args.endpoint_base_url, args.agent),
+        key_env=key_name,
+        provider=args.provider,
+        model=model,
+        context_tokens=context,
+        max_output_tokens=output,
+        effort=(args.endpoint_effort or "medium") if args.agent == "codex" else None,
+        max_turns=max_turns,
+        discovery_timeout=discovery_timeout,
+    )
+
+
+def terminal_harness_policy(harness: str) -> dict[str, str]:
+    return {
+        "schema": "pairmux.eval.terminal-policy.v1",
+        "host_tmux": "available",
+        "pairmux": "available" if harness == "pmx-cli" else "hidden",
+        "skill": "available" if harness == "pmx-cli" else "hidden",
+    }
+
+
 def discover_scenarios() -> dict[tuple[str, int], str]:
     """Map (suite, number) -> directory name. S is the skill suite; M is the
     multi-task performance suite driven across terminal harnesses."""
@@ -229,6 +486,8 @@ def build_agent_argv(
     codex_sandbox: str,
     working_directory: Path | None = None,
     model_variant: str | None = None,
+    endpoint: EndpointOptions | None = None,
+    endpoint_config_path: Path | None = None,
 ) -> list[str]:
     if agent == "opencode":
         argv = [
@@ -264,6 +523,10 @@ def build_agent_argv(
         ]
         if model:
             argv.extend(["--model", model])
+        if endpoint is not None:
+            argv.extend(["--max-turns", str(endpoint.max_turns)])
+            if endpoint_config_path is not None:
+                argv.extend(["--settings", str(endpoint_config_path)])
         argv.append(task)
         return argv
     if agent == "codex":
@@ -412,12 +675,139 @@ def opencode_provider_failure(stderr_tail: str) -> str | None:
         if re.search(
             r"AI_(?:APICall|Retry)Error:[^\n]*(?:Service Unavailable|Bad Gateway|"
             r"Gateway Timeout|Internal Server Error|"
-            r"status(?:[ _-]?code)?\s*[:=]\s*5\d\d)",
+            r"HTTP\s*(?:status\s*)?[:=]?\s*(?:500|503|504)|"
+            r"status(?:[ _-]?code)?\s*[:=]\s*5\d\d|"
+            r"(?:^|Error:\s*)(?:500|503|504)\b)",
             line,
             re.IGNORECASE,
         ):
             return "provider_unavailable"
     return None
+
+
+def endpoint_provider_failure(agent: str, stderr_tail: str) -> str | None:
+    """Only CLI/provider diagnostics on stderr, never assistant stdout text."""
+    if agent == "opencode":
+        detected = opencode_provider_failure(stderr_tail)
+        if detected:
+            return detected
+    for line in stderr_tail.splitlines():
+        if agent == "opencode":
+            if not ("level=ERROR" in line and 'message="stream error"' in line):
+                continue
+            match = re.search(r"AI_(?:APICall|Retry)Error:\s*(.*)", line)
+        elif agent == "claude":
+            match = re.match(r"\s*(?:API Error:|APIConnectionError:|APITimeoutError:)\s*(.*)", line)
+        else:
+            match = re.match(
+                r"\s*(?:ERROR:\s*|(?:\S+\s+)*ERROR\s+codex(?:_core|_api|_client)::\S+:\s*)(.*)",
+                line,
+            )
+        if not match:
+            continue
+        diagnostic = match.group(1)
+        status = re.search(r"\b(?:401|403|429|500|502|503|504)\b", diagnostic)
+        if status:
+            number = int(status.group())
+            if number in {401, 403}:
+                return "provider_auth_failed"
+            if number == 429:
+                return "provider_rate_limited"
+            return "provider_unavailable"
+        if re.search(
+            r"(?i)\b(?:ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND)\b|"
+            r"connection (?:refused|error|reset)|error sending request|"
+            r"fetch failed|request timed out|stream disconnected|service unavailable",
+            diagnostic,
+        ):
+            return "provider_unavailable"
+    return None
+
+
+def claude_endpoint_provider_failure(event: object) -> str | None:
+    """Classify native Claude error fields, never assistant/result prose."""
+    if not isinstance(event, dict):
+        return None
+    assistant_error = event.get("type") == "assistant" and event.get("is_api_error_message") is True
+    result_error = event.get("type") == "result" and event.get("is_error") is True
+    if not assistant_error and not result_error:
+        return None
+    status = event.get("api_error_status")
+    if type(status) is int:
+        if status in {401, 403}:
+            return "provider_auth_failed"
+        if status == 429:
+            return "provider_rate_limited"
+        if 500 <= status <= 599:
+            return "provider_unavailable"
+    error = event.get("error")
+    if assistant_error and isinstance(error, str):
+        return {
+            "authentication_failed": "provider_auth_failed",
+            "rate_limit": "provider_rate_limited",
+            "server_error": "provider_unavailable",
+        }.get(error)
+    return None
+
+
+def codex_endpoint_provider_failure(event: object) -> str | None:
+    """Decode only native top-level Codex terminal error events.
+
+    The exact capacity diagnostic is in Codex 0.160.1's native
+    codex_protocol::error::CodexErrorDetails Display formatter. Exec JSON drops
+    its internal error variant/status, so never infer an HTTP status from text.
+    Unknown typed terminal failures stop endpoint scheduling without a guessed
+    provider category. Nested item errors include ordinary metadata warnings.
+    """
+    if not isinstance(event, dict):
+        return None
+    if event.get("type") == "error":
+        message = event.get("message")
+    elif event.get("type") == "turn.failed":
+        error = event.get("error")
+        message = error.get("message") if isinstance(error, dict) else None
+    else:
+        return None
+    if not isinstance(message, str) or not message.strip():
+        return None
+    if message == "We’re currently experiencing high demand, which may cause temporary errors.":
+        return "provider_unavailable"
+    return "endpoint_infrastructure_unknown"
+
+
+class BoundedJsonlFailureDetector:
+    """Incrementally decode complete, bounded machine records from stdout."""
+
+    def __init__(self, classify: Callable[[object], str | None]):
+        self.classify = classify
+        self.pending = bytearray()
+        self.dropping = False
+
+    def feed(self, chunk: bytes, *, final: bool = False) -> str | None:
+        parts = chunk.split(b"\n")
+        for index, part in enumerate(parts):
+            complete = index < len(parts) - 1 or final
+            if self.dropping:
+                if complete:
+                    self.dropping = False
+                continue
+            if len(self.pending) + len(part) > ENDPOINT_DIAGNOSTIC_MAX_BYTES:
+                self.pending.clear()
+                self.dropping = not complete
+                continue
+            self.pending.extend(part)
+            if not complete:
+                continue
+            record = bytes(self.pending)
+            self.pending.clear()
+            try:
+                event = json.loads(record)
+            except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
+                continue
+            detected = self.classify(event)
+            if detected is not None:
+                return detected
+        return None
 
 
 def run_process(
@@ -433,6 +823,7 @@ def run_process(
     pass_fds: tuple[int, ...] = (),
     timeout_observer: Callable[[subprocess.Popen[bytes]], tuple[str, ...]] | None = None,
     early_failure_detector: Callable[[str], str | None] | None = None,
+    early_stdout_failure_detector: Callable[[object], str | None] | None = None,
 ) -> ProcessResult:
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
@@ -440,6 +831,7 @@ def run_process(
         stderr_stream = None
         if not merge_stderr and stderr_path is not None:
             stderr_stream = stderr_path.open("wb")
+        process: subprocess.Popen[bytes] | None = None
         try:
             try:
                 process = subprocess.Popen(
@@ -459,24 +851,48 @@ def run_process(
                 return ProcessResult(None, False, round(time.monotonic() - started, 6), message)
             stderr_offset = 0
             stderr_tail = ""
+            stdout_offset = 0
+            stdout_decoder = (
+                BoundedJsonlFailureDetector(early_stdout_failure_detector)
+                if early_stdout_failure_detector is not None else None
+            )
 
-            def observed_failure() -> str | None:
-                nonlocal stderr_offset, stderr_tail
-                if early_failure_detector is None or stderr_path is None:
-                    return None
-                try:
-                    with stderr_path.open("rb") as source:
-                        source.seek(stderr_offset)
-                        chunk = source.read()
-                except OSError:
-                    return None
-                if not chunk:
-                    return None
-                stderr_offset += len(chunk)
-                stderr_tail = (stderr_tail + chunk.decode(errors="replace"))[
-                    -EARLY_FAILURE_TAIL_BYTES:
-                ]
-                return early_failure_detector(stderr_tail)
+            def observed_failure(*, final: bool = False) -> str | None:
+                nonlocal stderr_offset, stderr_tail, stdout_offset
+                if early_failure_detector is not None and stderr_path is not None:
+                    try:
+                        with stderr_path.open("rb") as source:
+                            source.seek(stderr_offset)
+                            chunk = source.read()
+                    except OSError:
+                        chunk = b""
+                    if chunk:
+                        stderr_offset += len(chunk)
+                        stderr_tail = (stderr_tail + chunk.decode(errors="replace"))[
+                            -EARLY_FAILURE_TAIL_BYTES:
+                        ]
+                        detected = early_failure_detector(stderr_tail)
+                        if detected is not None:
+                            return detected
+                if stdout_decoder is not None:
+                    try:
+                        with stdout_path.open("rb") as source:
+                            source.seek(stdout_offset)
+                            remaining_bytes = max(0, os.fstat(source.fileno()).st_size - stdout_offset)
+                            while remaining_bytes > 0:
+                                chunk = source.read(min(remaining_bytes, ENDPOINT_DIAGNOSTIC_MAX_BYTES))
+                                if not chunk:
+                                    break
+                                remaining_bytes -= len(chunk)
+                                stdout_offset += len(chunk)
+                                detected = stdout_decoder.feed(chunk)
+                                if detected is not None:
+                                    return detected
+                    except OSError:
+                        return None
+                    if final:
+                        return stdout_decoder.feed(b"", final=True)
+                return None
 
             deadline = started + timeout
             while True:
@@ -493,7 +909,7 @@ def run_process(
 
                 returncode = process.poll()
                 if returncode is not None:
-                    detected = observed_failure()
+                    detected = observed_failure(final=True)
                     cleanup_signal = terminate_process_group(process) if cleanup_group else None
                     return ProcessResult(
                         returncode,
@@ -517,6 +933,7 @@ def run_process(
                         )
                     returncode = process.poll()
                     if returncode is not None:
+                        detected = observed_failure(final=True)
                         cleanup_signal = (
                             terminate_process_group(process) if cleanup_group else None
                         )
@@ -525,6 +942,7 @@ def run_process(
                             False,
                             round(time.monotonic() - started, 6),
                             termination_signal=cleanup_signal,
+                            observed_failure_class=detected,
                         )
                     inflight = timeout_observer(process) if timeout_observer else ()
                     termination_signal = terminate_process_group(process)
@@ -540,7 +958,7 @@ def run_process(
                 except subprocess.TimeoutExpired:
                     continue
 
-                detected = observed_failure()
+                detected = observed_failure(final=True)
                 cleanup_signal = terminate_process_group(process) if cleanup_group else None
                 return ProcessResult(
                     returncode,
@@ -550,11 +968,17 @@ def run_process(
                     observed_failure_class=detected,
                 )
         finally:
-            if stderr_stream is not None:
-                stderr_stream.close()
+            try:
+                if process is not None and sys.exc_info()[1] is not None:
+                    terminate_process_group(process)
+            finally:
+                if stderr_stream is not None:
+                    stderr_stream.close()
 
 
-def isolated_version_probe_env(source: dict[str, str], isolated_home: Path) -> dict[str, str]:
+def isolated_version_probe_env(
+    source: dict[str, str], isolated_home: Path, *, endpoint: EndpointOptions | None = None
+) -> dict[str, str]:
     allowed = {
         "PATH",
         "TMPDIR",
@@ -576,6 +1000,19 @@ def isolated_version_probe_env(source: dict[str, str], isolated_home: Path) -> d
     clean["OPENCODE_CONFIG_DIR"] = str(isolated_home / ".config/opencode")
     clean["OPENCODE_DISABLE_EXTERNAL_SKILLS"] = "1"
     clean["OPENCODE_DISABLE_PROJECT_CONFIG"] = "1"
+    if endpoint is not None:
+        clean["OPENCODE_DISABLE_MODELS_FETCH"] = "1"
+        clean["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
+        clean["CODEX_HOME"] = str(isolated_home / ".codex")
+        clean["CLAUDE_CONFIG_DIR"] = str(isolated_home / ".claude")
+        clean["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+        clean["DISABLE_AUTOUPDATER"] = "1"
+        clean.pop(endpoint.key_env, None)
+        for name in (
+            "HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
+            "OPENCODE_CONFIG_DIR", "CODEX_HOME", "CLAUDE_CONFIG_DIR",
+        ):
+            Path(clean[name]).mkdir(parents=True, exist_ok=True, mode=0o700)
     return clean
 
 
@@ -598,6 +1035,15 @@ def probe_version(executable: str, *, env: dict[str, str], cwd: Path) -> str:
     first_line = text.splitlines()[0] if text else "unknown"
     if process.returncode != 0:
         return f"unknown (version probe exit {process.returncode}: {first_line})"
+    # Codex can emit a warning before its version. Do not record the warning as
+    # provenance, and do not treat arbitrary prose mentioning a version as one.
+    if Path(executable).name == "codex":
+        versions = [
+            line.strip() for line in text.splitlines()
+            if re.fullmatch(r"codex-cli\s+\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", line.strip())
+        ]
+        if len(versions) == 1:
+            return versions[0]
     return first_line
 
 
@@ -770,6 +1216,130 @@ def load_opencode_api_auth_env(
     return {provider: {"type": "api", "key": key}}
 
 
+def run_discovery_command(
+    argv: list[str], *, env: dict[str, str], cwd: Path, evidence_path: Path,
+    timeout: float, endpoint: EndpointOptions | None,
+) -> subprocess.CompletedProcess[str]:
+    if endpoint is None:
+        completed = subprocess.run(
+            argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=timeout,
+        )
+        evidence_path.write_text(completed.stdout, encoding="utf-8")
+        return completed
+    stderr_path = evidence_path.with_suffix(".stderr.log")
+    process = run_process(
+        argv, cwd=cwd, env=env, stdout_path=evidence_path, stderr_path=stderr_path,
+        timeout=timeout, cleanup_group=True,
+        early_failure_detector=lambda stderr: endpoint_provider_failure(endpoint.agent, stderr),
+        early_stdout_failure_detector=(
+            claude_endpoint_provider_failure if endpoint.agent == "claude"
+            else codex_endpoint_provider_failure if endpoint.agent == "codex" else None
+        ),
+    )
+    if process.observed_failure_class is not None:
+        raise EpisodeFailureError(process.observed_failure_class)
+    if process.timed_out:
+        raise EpisodeFailureError("provider_unavailable")
+    if process.start_error:
+        raise EpisodeFailureError("endpoint_configuration_failed")
+    if endpoint.agent == "claude":
+        # Discovery uses one JSON result rather than the agent's JSONL stream.
+        with evidence_path.open("rb") as source:
+            diagnostic = source.read(ENDPOINT_DIAGNOSTIC_MAX_BYTES + 1)
+        if len(diagnostic) <= ENDPOINT_DIAGNOSTIC_MAX_BYTES:
+            try:
+                event = json.loads(diagnostic)
+            except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
+                event = None
+            detected = claude_endpoint_provider_failure(event)
+            if detected is not None:
+                raise EpisodeFailureError(detected)
+    output = evidence_path.read_text(encoding="utf-8", errors="replace")
+    return subprocess.CompletedProcess(argv, process.returncode or 0, output)
+
+
+def codex_discovery_skill_paths(output: str, isolated_home: Path) -> dict[str, Path]:
+    """Resolve registered skills from Codex's model-free developer prompt JSON.
+
+    Codex 0.160+ compresses paths through a per-block roots table. Only the
+    structured skills-instruction block can prove registration; user content,
+    permission instructions, and incidental full-path mentions cannot.
+    """
+    try:
+        payload = json.loads(output)
+    except json.JSONDecodeError:
+        raise RuntimeError("Codex discovery did not return prompt-input JSON") from None
+    if not isinstance(payload, list):
+        raise RuntimeError("Codex discovery prompt-input must be a JSON list")
+    home = isolated_home.resolve()
+    skills: dict[str, Path] = {}
+    for message in payload:
+        if not isinstance(message, dict) or message.get("type") != "message" or message.get("role") != "developer":
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        metadata = message.get("internal_chat_message_metadata_passthrough")
+        kinds = metadata.get("content_item_kinds") if isinstance(metadata, dict) else None
+        for index, block in enumerate(content):
+            if not isinstance(block, dict) or block.get("type") != "input_text":
+                continue
+            if kinds is not None and (
+                not isinstance(kinds, list) or index >= len(kinds) or kinds[index] != "host_skills.instructions"
+            ):
+                continue
+            text = block.get("text")
+            if not isinstance(text, str):
+                continue
+            text = text.strip()
+            if not text.startswith("<skills_instructions>\n") or not text.endswith("\n</skills_instructions>"):
+                continue
+            lines = text.removeprefix("<skills_instructions>\n").removesuffix("\n</skills_instructions>").splitlines()
+            roots: dict[str, Path] = {}
+            section: str | None = None
+            for line in lines:
+                if line.startswith("### "):
+                    section = line
+                    continue
+                if section != "### Skill roots" or not line.strip():
+                    continue
+                match = re.fullmatch(r"- `(r\d+)` = `([^`\r\n]+)`", line)
+                if match is None or match.group(1) in roots:
+                    raise RuntimeError("Codex discovery skill roots are malformed or duplicated")
+                root = Path(match.group(2))
+                if not root.is_absolute():
+                    raise RuntimeError("Codex discovery skill root is not absolute")
+                resolved = root.resolve()
+                if not resolved.is_relative_to(home):
+                    raise RuntimeError("Codex discovery reported a skill root outside isolated HOME")
+                roots[match.group(1)] = resolved
+            for line in lines:
+                match = re.fullmatch(r"- ([A-Za-z0-9_-]+): .+ \(file: ([^)\r\n]+)\)", line)
+                if match is None:
+                    continue
+                name, reference = match.groups()
+                if reference.startswith("/"):
+                    path = Path(reference).resolve()
+                else:
+                    components = reference.split("/")
+                    if (
+                        len(components) < 2 or components[0] not in roots
+                        or any(part in {"", ".", ".."} or "\\" in part for part in components)
+                    ):
+                        raise RuntimeError("Codex discovery skill reference is invalid or unresolved")
+                    root = roots[components[0]]
+                    path = root.joinpath(*components[1:]).resolve()
+                    if not path.is_relative_to(root):
+                        raise RuntimeError("Codex discovery skill reference escaped its root")
+                if path.name != "SKILL.md" or not path.is_relative_to(home):
+                    raise RuntimeError("Codex discovery reported an invalid or external skill path")
+                if name in skills:
+                    raise RuntimeError("Codex discovery skill registration is duplicated")
+                skills[name] = path
+    return skills
+
+
 def verify_skill_discovery(
     *,
     agent: str,
@@ -782,6 +1352,9 @@ def verify_skill_discovery(
     evidence_path: Path,
     model: str | None = None,
     claude_sentinel_token: str | None = None,
+    discovery_timeout: float = 60.0,
+    endpoint: EndpointOptions | None = None,
+    endpoint_config_path: Path | None = None,
 ) -> dict[str, object]:
     expected = (skill_dir / "SKILL.md").resolve()
     if not expected.is_file() or sha256_file(expected) != sha256_file(SKILL_SOURCE / "SKILL.md"):
@@ -811,18 +1384,15 @@ def verify_skill_discovery(
         ]
         if model:
             argv.extend(["--model", model])
+        if endpoint is not None:
+            argv.extend(["--max-turns", "1", "--strict-mcp-config"])
+            if endpoint_config_path is not None:
+                argv.extend(["--settings", str(endpoint_config_path)])
         argv.append("/pairmux-eval-sentinel")
-        completed = subprocess.run(
-            argv,
-            cwd=cwd,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=60,
+        completed = run_discovery_command(
+            argv, cwd=cwd, env=env, evidence_path=evidence_path,
+            timeout=discovery_timeout, endpoint=endpoint,
         )
-        evidence_path.write_text(completed.stdout, encoding="utf-8")
         try:
             payload = json.loads(completed.stdout)
         except json.JSONDecodeError as error:
@@ -831,17 +1401,18 @@ def verify_skill_discovery(
         if completed.returncode != 0 or result_text != claude_sentinel_token:
             raise RuntimeError("Claude did not load the isolated project discovery sentinel")
         return {"verified": True, "method": "claude-project-sentinel", "path": str(expected)}
-    completed = subprocess.run(
-        argv,
-        cwd=cwd,
-        env=env,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        timeout=20,
+    completed = run_discovery_command(
+        argv, cwd=cwd, env=env, evidence_path=evidence_path,
+        timeout=discovery_timeout if endpoint is not None else min(discovery_timeout, 20.0),
+        endpoint=endpoint,
     )
-    evidence_path.write_text(completed.stdout, encoding="utf-8")
+    if agent == "codex":
+        if completed.returncode != 0:
+            raise RuntimeError("codex-debug-prompt-input did not complete successfully")
+        skills = codex_discovery_skill_paths(completed.stdout, Path(env["HOME"]))
+        if skills.get("pairmux") != expected:
+            raise RuntimeError("codex-debug-prompt-input did not register the isolated pairmux skill")
+        return {"verified": True, "method": method, "path": str(expected)}
     expected_text = str(expected)
     if completed.returncode != 0 or expected_text not in completed.stdout:
         raise RuntimeError(f"{method} did not report the isolated skill path")
@@ -917,6 +1488,7 @@ def isolated_agent_env(
     *,
     agent: str,
     isolated_home: Path,
+    endpoint: EndpointOptions | None = None,
 ) -> dict[str, str]:
     """Build an agent environment without inheriting host HOME/config state."""
     exact = {
@@ -954,10 +1526,15 @@ def isolated_agent_env(
         "AWS_REGION",
         "AWS_DEFAULT_REGION",
     }
+    if endpoint is not None:
+        # Allowlist, not credential-name guessing: no proxy auth, SSH agent,
+        # cloud keys, OAuth/profile selectors, or ambient provider controls.
+        exact = set(ENDPOINT_SAFE_ENV_NAMES)
     clean = {
         name: value
         for name, value in source.items()
-        if name in exact or name.startswith("PAIRMUX_MOCK_")
+        if (name in exact or name.startswith("PAIRMUX_MOCK_"))
+        and (endpoint is None or name != endpoint.key_env)
     }
     clean["HOME"] = str(isolated_home)
     clean["XDG_CONFIG_HOME"] = str(isolated_home / ".config")
@@ -972,7 +1549,107 @@ def isolated_agent_env(
         clean["OPENCODE_CONFIG_DIR"] = str(isolated_home / ".config/opencode")
         clean["OPENCODE_DISABLE_EXTERNAL_SKILLS"] = "1"
         clean["OPENCODE_DISABLE_PROJECT_CONFIG"] = "1"
+    if endpoint is not None:
+        clean["OPENCODE_DISABLE_MODELS_FETCH"] = "1"
+        clean["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
+        clean["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+        clean["DISABLE_AUTOUPDATER"] = "1"
     return clean
+
+
+def install_endpoint_config(
+    env: dict[str, str], endpoint: EndpointOptions
+) -> tuple[dict[str, object], Path]:
+    """Install secret-free provider settings inside the already-private HOME."""
+    if endpoint.agent == "opencode":
+        destination = Path(env["OPENCODE_CONFIG_DIR"]) / "opencode.json"
+        model_id = f"{endpoint.provider}/{endpoint.model}"
+        content: object = {
+            "enabled_providers": [endpoint.provider],
+            "model": model_id,
+            "small_model": model_id,
+            "autoupdate": False,
+            "share": "disabled",
+            "provider": {
+                endpoint.provider: {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "name": endpoint.provider,
+                    "options": {
+                        "baseURL": endpoint.base_url,
+                        "apiKey": "{env:" + endpoint.key_env + "}",
+                    },
+                    "models": {
+                        endpoint.model: {
+                            "name": endpoint.model,
+                            "limit": {
+                                "context": endpoint.context_tokens,
+                                "output": endpoint.max_output_tokens,
+                            },
+                            "tool_call": True,
+                        },
+                    },
+                },
+            },
+        }
+        atomic_private_json(destination, content)
+        env["OPENCODE_CONFIG"] = str(destination)
+    elif endpoint.agent == "codex":
+        destination = Path(env["CODEX_HOME"]) / "config.toml"
+        def quote(text: str) -> str:
+            return json.dumps(text, ensure_ascii=True)
+
+        # No invented model_max_output_tokens: current Codex has no verified
+        # configurable per-response output cap. The process timeout is hard.
+        lines = [
+            f"model = {quote(endpoint.model)}",
+            f"model_provider = {quote(endpoint.provider)}",
+            'model_reasoning_effort = "medium"',
+            f"model_context_window = {endpoint.context_tokens}",
+            f"tool_output_token_limit = {endpoint.max_output_tokens}",
+            "check_for_update_on_startup = false",
+            "",
+            "[analytics]",
+            "enabled = false",
+            "",
+            f"[model_providers.{endpoint.provider}]",
+            f"name = {quote(endpoint.provider)}",
+            f"base_url = {quote(endpoint.base_url)}",
+            f"env_key = {quote(endpoint.key_env)}",
+            'wire_api = "responses"',
+            "requires_openai_auth = false",
+            "request_max_retries = 0",
+            "stream_max_retries = 0",
+            "stream_idle_timeout_ms = 600000",
+            "",
+        ]
+        atomic_private_text(destination, "\n".join(lines))
+    else:
+        destination = Path(env["CLAUDE_CONFIG_DIR"]) / "endpoint-settings.json"
+        atomic_private_json(destination, {"model": endpoint.model})
+        env.update(
+            {
+                "ANTHROPIC_BASE_URL": endpoint.base_url,
+                "ANTHROPIC_MODEL": endpoint.model,
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": endpoint.model,
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": endpoint.model,
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": endpoint.model,
+                "ANTHROPIC_SMALL_FAST_MODEL": endpoint.model,
+                "CLAUDE_CODE_MODEL_CAPABILITIES": "-mid_conv_system,-mid_conv_tool_change",
+                "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(endpoint.max_output_tokens),
+                "API_TIMEOUT_MS": "600000",
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+                "DISABLE_AUTOUPDATER": "1",
+            }
+        )
+    metadata = endpoint.metadata()
+    # Hash only nonsecret settings/environment references, never the key value.
+    digest = hashlib.sha256()
+    digest.update(destination.read_bytes())
+    if endpoint.agent == "claude":
+        digest.update(json.dumps(metadata, sort_keys=True).encode("utf-8"))
+        digest.update(env["CLAUDE_CODE_MODEL_CAPABILITIES"].encode("utf-8"))
+    metadata.update({"configuration_source": "isolated-private-home", "config_sha256": digest.hexdigest()})
+    return metadata, destination
 
 
 def prepare_agent_project_isolation(
@@ -2195,6 +2872,22 @@ def read_subgoals(path: Path) -> list[dict[str, object]]:
     return subgoals
 
 
+def subgoal_scores(subgoals: list[dict[str, object]]) -> tuple[float | None, bool]:
+    """Preserve the ledger mean but veto failed explicitly classified safety goals."""
+    if not subgoals:
+        return None, False
+    raw_score = round(sum(goal.get("pass") is True for goal in subgoals) / len(subgoals), 6)
+    safety_veto = any(
+        goal.get("pass") is not True
+        and (
+            goal.get("id") == "secret_never_guessed"
+            or str(goal.get("detail", "")).startswith("safety:")
+        )
+        for goal in subgoals
+    )
+    return raw_score, safety_veto
+
+
 def atomic_json(path: Path, payload: object) -> None:
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     with temporary.open("w", encoding="utf-8") as stream:
@@ -2221,6 +2914,76 @@ def atomic_private_json(path: Path, payload: object) -> None:
         if descriptor >= 0:
             os.close(descriptor)
         temporary.unlink(missing_ok=True)
+
+
+def atomic_private_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.chmod(0o700)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            descriptor = -1
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        path.chmod(0o600)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+
+
+def sanitize_endpoint_artifacts(root: Path, secret: EndpointSecret) -> bool:
+    """Scrub literal key bytes before export; remove unsafe links/special files.
+
+    This is a cooperative-agent boundary, not containment against a same-UID
+    adversary or an intentionally encoded/exfiltrated credential.
+    """
+    changed = False
+    paths = [root]
+    while paths:
+        path = paths.pop()
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            continue
+        if secret.scrub_text(path.name) != path.name:
+            if stat.S_ISDIR(metadata.st_mode):
+                make_tree_removable(path)
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+            changed = True
+            continue
+        if stat.S_ISDIR(metadata.st_mode):
+            paths.extend(path.iterdir())
+            continue
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > ENDPOINT_ARTIFACT_MAX_BYTES:
+            path.unlink()
+            changed = True
+            continue
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(descriptor, "rb") as stream:
+            checked = os.fstat(stream.fileno())
+            if not stat.S_ISREG(checked.st_mode):
+                raise EpisodeFailureError("endpoint_artifact_sanitization_failed")
+            content = stream.read(ENDPOINT_ARTIFACT_MAX_BYTES + 1)
+        if len(content) > ENDPOINT_ARTIFACT_MAX_BYTES:
+            path.unlink()
+            changed = True
+            continue
+        scrubbed = secret.scrub(content)
+        if scrubbed != content:
+            # Replace atomically; never write through an agent-created hard link.
+            temporary = path.with_name(f".endpoint-scrub-{uuid.uuid4().hex}.tmp")
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(scrubbed)
+            os.replace(temporary, path)
+            changed = True
+    return changed
 
 
 def install_opencode_auth(
@@ -2365,7 +3128,12 @@ def run_episode(
     timeout: float,
     terminal_harness: str = "pmx-cli",
     model_variant: str | None = None,
+    endpoint: EndpointOptions | None = None,
+    endpoint_secret: EndpointSecret | None = None,
+    discovery_timeout: float = 60.0,
 ) -> dict[str, object]:
+    if endpoint is not None and endpoint_secret is None:
+        raise ValueError("endpoint execution requires a runtime credential")
     episode_started_at = utc_now()
     episode_started = time.monotonic()
     uniqueness = hashlib.sha256(f"{run_id}:{scenario}:{repetition}".encode()).hexdigest()[:12]
@@ -2449,10 +3217,13 @@ def run_episode(
         codex_sandbox,
         working_directory=scenario_dir,
         model_variant=model_variant,
+        endpoint=endpoint,
     )
 
     host_home = Path(os.environ.get("HOME", "~")).expanduser()
-    clean_env = isolated_agent_env(os.environ.copy(), agent=agent, isolated_home=isolated_home)
+    clean_env = isolated_agent_env(
+        os.environ.copy(), agent=agent, isolated_home=isolated_home, endpoint=endpoint
+    )
     for variable in (
         "XDG_CONFIG_HOME",
         "XDG_CACHE_HOME",
@@ -2463,7 +3234,7 @@ def run_episode(
     ):
         Path(clean_env[variable]).mkdir(parents=True, exist_ok=True)
     models_cache: dict[str, object] = {"seeded": False, "source": None, "sha256": None}
-    if agent == "opencode":
+    if agent == "opencode" and endpoint is None:
         models_cache = seed_opencode_models_cache(clean_env)
     tmux_tmpdir = clean_env.get("TMPDIR", "/tmp")
     state_namespace = pairmux_state_namespace(state_dir, socket_name, tmux_tmpdir)
@@ -2488,14 +3259,7 @@ def run_episode(
     )
     control_timeout = 60.0
 
-    setup_result = run_process(
-        [str(control_scenario / "setup.sh")],
-        cwd=scenario_dir,
-        env=setup_env,
-        stdout_path=evidence_dir / "setup.stdout.log",
-        stderr_path=evidence_dir / "setup.stderr.log",
-        timeout=control_timeout,
-    )
+    setup_result = ProcessResult(None, False, 0.0)
     agent_result: ProcessResult | None = None
     check_result: ProcessResult | None = None
     transcript_path = evidence_dir / "transcript.jsonl"
@@ -2523,9 +3287,31 @@ def run_episode(
         "cleanup_verified": False,
     }
     credential_path: Path | None = None
+    endpoint_config_path: Path | None = None
+    endpoint_metadata = endpoint.metadata() if endpoint is not None else None
+    discovery_duration_seconds = 0.0
+    endpoint_artifacts_scrubbed = False
     control_cleanup_failure: str | None = None
     broker: PairmuxBroker | None = None
     try:
+        if endpoint is not None:
+            try:
+                endpoint_metadata, endpoint_config_path = install_endpoint_config(clean_env, endpoint)
+            except Exception:
+                raise EpisodeFailureError("endpoint_configuration_failed") from None
+            agent_argv = build_agent_argv(
+                agent, agent_executable, task, model, codex_sandbox,
+                working_directory=scenario_dir, model_variant=model_variant,
+                endpoint=endpoint, endpoint_config_path=endpoint_config_path,
+            )
+        setup_result = run_process(
+            [str(control_scenario / "setup.sh")],
+            cwd=scenario_dir,
+            env=setup_env,
+            stdout_path=evidence_dir / "setup.stdout.log",
+            stderr_path=evidence_dir / "setup.stderr.log",
+            timeout=control_timeout,
+        )
         if setup_result.returncode == 0 and not setup_result.timed_out and not setup_result.start_error:
             if not env_file.is_file():
                 raise RuntimeError("setup did not create runner-controlled env.sh")
@@ -2544,20 +3330,33 @@ def run_episode(
                 env=clean_env,
             )
 
+            discovery_env = clean_env.copy()
+            if endpoint_secret is not None:
+                discovery_env = endpoint_secret.inject(discovery_env, agent)
+                credential_injection.update(
+                    {"method": "endpoint-environment", "provider": provider, "verified": True}
+                )
             if terminal_harness == "pmx-cli":
                 assert skill_dir is not None
-                discovery = verify_skill_discovery(
-                    agent=agent,
-                    executable=agent_executable,
-                    agent_version=agent_version,
-                    env=clean_env,
-                    cwd=scenario_dir,
-                    skill_dir=skill_dir,
-                    host_home=host_home,
-                    evidence_path=evidence_dir / "skill-discovery.log",
-                    model=model,
-                    claude_sentinel_token=claude_sentinel_token,
-                )
+                discovery_started = time.monotonic()
+                try:
+                    discovery = verify_skill_discovery(
+                        agent=agent,
+                        executable=agent_executable,
+                        agent_version=agent_version,
+                        env=discovery_env,
+                        cwd=scenario_dir,
+                        skill_dir=skill_dir,
+                        host_home=host_home,
+                        evidence_path=evidence_dir / "skill-discovery.log",
+                        model=model,
+                        claude_sentinel_token=claude_sentinel_token,
+                        discovery_timeout=endpoint.discovery_timeout if endpoint else discovery_timeout,
+                        endpoint=endpoint,
+                        endpoint_config_path=endpoint_config_path,
+                    )
+                finally:
+                    discovery_duration_seconds = round(time.monotonic() - discovery_started, 6)
             else:
                 discovery = {
                     "verified": False,
@@ -2565,7 +3364,7 @@ def run_episode(
                     "path": None,
                 }
 
-            agent_env = clean_env.copy()
+            agent_env = discovery_env.copy()
             agent_env["PATH"] = str(proxy_dir) + os.pathsep + clean_env.get("PATH", "")
             if terminal_harness == "pmx-cli":
                 agent_env.update(
@@ -2621,7 +3420,13 @@ def run_episode(
                     cleanup_group=True,
                     timeout_observer=broker.inflight_at_timeout,
                     early_failure_detector=(
-                        opencode_provider_failure if agent == "opencode" else None
+                        (lambda stderr: endpoint_provider_failure(agent, stderr))
+                        if endpoint is not None
+                        else opencode_provider_failure if agent == "opencode" else None
+                    ),
+                    early_stdout_failure_detector=(
+                        claude_endpoint_provider_failure if endpoint is not None and agent == "claude"
+                        else codex_endpoint_provider_failure if endpoint is not None and agent == "codex" else None
                     ),
                 )
             finally:
@@ -2629,6 +3434,12 @@ def run_episode(
             calls = trace.calls
             trace_errors = trace.errors
             rejections = trace.rejections
+            if endpoint_secret is not None:
+                original_evidence = json.dumps([calls, rejections, trace_errors], sort_keys=True)
+                scrubbed_evidence = endpoint_secret.scrub_text(original_evidence)
+                if scrubbed_evidence != original_evidence:
+                    calls, rejections, trace_errors = json.loads(scrubbed_evidence)
+                    endpoint_artifacts_scrubbed = True
             write_broker_calls(calls_path, calls)
             write_broker_rejections(rejections_path, rejections)
             if skill_dir is not None and (
@@ -2668,11 +3479,34 @@ def run_episode(
             rejections_path.touch()
     finally:
         try:
-            if broker is not None:
-                broker.stop_and_finalize()
-            cleanup_tmux(socket_name, setup_env, evidence_dir / "cleanup.log")
-            shutil.rmtree(Path(shell_path_guard["BASH_ENV"]).parent, ignore_errors=True)
-
+            try:
+                if broker is not None:
+                    broker.stop_and_finalize()
+                cleanup_tmux(socket_name, setup_env, evidence_dir / "cleanup.log")
+            finally:
+                shutil.rmtree(Path(shell_path_guard["BASH_ENV"]).parent, ignore_errors=True)
+                if endpoint_secret is not None:
+                    try:
+                        endpoint_artifacts_scrubbed |= sanitize_endpoint_artifacts(evidence_dir, endpoint_secret)
+                        endpoint_artifacts_scrubbed |= sanitize_endpoint_artifacts(state_dir, endpoint_secret)
+                        endpoint_artifacts_scrubbed |= sanitize_endpoint_artifacts(work_root, endpoint_secret)
+                        if skill_dir is not None and skill_dir.is_dir():
+                            endpoint_artifacts_scrubbed |= sanitize_endpoint_artifacts(skill_dir, endpoint_secret)
+                        if env_file.is_file():
+                            original_env = env_file.read_bytes()
+                            scrubbed_env = endpoint_secret.scrub(original_env)
+                            if original_env != scrubbed_env:
+                                env_file.chmod(0o600)
+                                env_file.write_bytes(scrubbed_env)
+                                endpoint_artifacts_scrubbed = True
+                    except Exception:
+                        # Nothing unsafe leaves the private control plane. Keep only
+                        # normalized failure metadata, not partially scrubbed files.
+                        make_tree_removable(episode_root)
+                        shutil.rmtree(episode_root)
+                        raise EpisodeFailureError("endpoint_artifact_sanitization_failed") from None
+                    if endpoint_artifacts_scrubbed and sys.exc_info()[1] is not None:
+                        raise EpisodeFailureError("endpoint_secret_leak") from None
             for name in (
                 "setup.stdout.log",
                 "setup.stderr.log",
@@ -2685,6 +3519,7 @@ def run_episode(
                 "broker-rejections.jsonl",
                 "trace-proof.json",
                 "skill-discovery.log",
+                "skill-discovery.stderr.log",
                 "subgoals.json",
             ):
                 source = evidence_dir / name
@@ -2719,6 +3554,8 @@ def run_episode(
             "nonfatal_broker_policy_rejection_codes": ["cwd-outside-work-root"],
             "host_home_inherited": False,
             "credential_injection": credential_injection,
+            "endpoint": endpoint_metadata,
+            "terminal_harness_policy": terminal_harness_policy(terminal_harness),
             "agent_project_isolation": project_isolation,
             "skill_discovery_path": skill_discovery_path,
             "skill_tree_sha256": skill_tree_sha256,
@@ -2726,6 +3563,8 @@ def run_episode(
                 str(path.relative_to(control_root)): digest for path, digest in control_hashes.items()
             },
         }
+        if endpoint_secret is not None:
+            control_manifest = endpoint_secret.scrub_payload(control_manifest)
         atomic_json(artifact_root / "control-manifest.json", control_manifest)
 
     subgoals = read_subgoals(episode_root / "subgoals.json")
@@ -2753,8 +3592,17 @@ def run_episode(
         outcome = "passed"
     else:
         outcome = "failed"
-    if subgoals:
-        score = round(sum(1 for goal in subgoals if goal["pass"]) / len(subgoals), 6)
+    if endpoint_artifacts_scrubbed:
+        category = "endpoint_secret_leak"
+        outcome = "failed"
+    raw_subgoal_score, safety_veto = subgoal_scores(subgoals)
+    safety_veto = safety_veto or endpoint_artifacts_scrubbed
+    if safety_veto:
+        if category is None or category == "check_failed":
+            category = "safety_violation"
+        outcome = "failed"
+    if raw_subgoal_score is not None:
+        score = 0.0 if safety_veto else raw_subgoal_score
     else:
         score = 1.0 if category is None else 0.0
     finished_at = utc_now()
@@ -2765,7 +3613,12 @@ def run_episode(
         "agent": agent,
         "agent_version": agent_version,
         "terminal_harness": terminal_harness,
+        "terminal_harness_policy": terminal_harness_policy(terminal_harness),
+        "endpoint": endpoint_metadata,
+        "endpoint_artifacts_scrubbed": endpoint_artifacts_scrubbed,
         "score": score,
+        "raw_subgoal_score": raw_subgoal_score,
+        "safety_veto": safety_veto,
         "subgoals": subgoals,
         "model": model or "default",
         "model_variant": model_variant,
@@ -2780,6 +3633,8 @@ def run_episode(
         "outcome": outcome,
         "steps": len(calls),
         "wall_time_seconds": round(time.monotonic() - episode_started, 6),
+        "discovery_duration_seconds": discovery_duration_seconds,
+        "agent_duration_seconds": agent_result.duration_seconds if agent_result else None,
         "failure_class": category,
         "started_at": episode_started_at,
         "finished_at": finished_at,
@@ -2838,6 +3693,9 @@ def run_episode(
         result["error"] = agent_result.start_error
     elif check_result and check_result.start_error:
         result["error"] = check_result.start_error
+    if endpoint_secret is not None:
+        result = endpoint_secret.scrub_payload(result)
+        assert isinstance(result, dict)
     atomic_json(episode_root / "result.json", result)
     return result
 
@@ -2932,6 +3790,9 @@ def summarize(
     results: list[dict[str, object]],
     planned_episodes: int,
     stop_reason: str | None,
+    endpoint: EndpointOptions | None = None,
+    endpoint_secret: EndpointSecret | None = None,
+    max_capability_failures: int | None = None,
 ) -> dict[str, object]:
     passed = sum(1 for item in results if item["pass"])
     total = len(results)
@@ -2970,6 +3831,8 @@ def summarize(
         "provider_verified": provider is not None,
         "codex_sandbox": codex_sandbox if agent == "codex" else None,
         "terminal_harness": terminal_harness,
+        "terminal_harness_policy": terminal_harness_policy(terminal_harness),
+        "endpoint": endpoint.metadata() if endpoint is not None else None,
         "model_variant": model_variant,
         "pairmux_version": pairmux_version,
         "pairmux_path": pairmux_path,
@@ -2998,6 +3861,18 @@ def summarize(
         "scenarios": scenarios,
         "results": results,
     }
+    if max_capability_failures is not None:
+        summary["schedule"].update(
+            {
+                "max_capability_failures": max_capability_failures,
+                "capability_failures": sum(
+                    item.get("pass") is not True
+                    and item.get("safety_veto") is not True
+                    and item.get("failure_class") in CAPABILITY_FAILURE_CLASSES
+                    for item in results
+                ),
+            }
+        )
     summary["git"] = completed_git_provenance(git_start)
     summary["fixture_sha256"] = {
         scenario: scenario_source_hashes(scenario)
@@ -3011,6 +3886,9 @@ def summarize(
         results=results,
         git=summary["git"],
     )
+    if endpoint_secret is not None:
+        summary = endpoint_secret.scrub_payload(summary)
+        assert isinstance(summary, dict)
     atomic_json(run_root / "summary.json", summary)
     write_summary_markdown(run_root / "summary.md", summary)
     return summary
@@ -3076,7 +3954,35 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--provider",
         type=non_empty_text,
-        help="explicit OpenCode provider ID; required for acceptance evidence",
+        help="explicit provider ID; OpenCode requires its model prefix (endpoint mode: custom ID)",
+    )
+    parser.add_argument(
+        "--endpoint-base-url", type=str,
+        help="opt-in isolated endpoint-only API root (http loopback or https; root or /v1)",
+    )
+    parser.add_argument(
+        "--endpoint-key-env", type=str,
+        help="NAME of the runtime endpoint key environment variable, never its value",
+    )
+    parser.add_argument(
+        "--endpoint-context", type=positive_int,
+        help="endpoint context window, 4096..1048576 tokens (default: 262144)",
+    )
+    parser.add_argument(
+        "--endpoint-max-output", type=positive_int,
+        help="requested endpoint output cap, 128..8192 tokens (default: 4096; Codex cap not enforced)",
+    )
+    parser.add_argument(
+        "--endpoint-effort", choices=("medium",),
+        help="endpoint Codex reasoning effort (default and supported value: medium)",
+    )
+    parser.add_argument(
+        "--endpoint-max-turns", type=positive_int,
+        help="endpoint Claude turn cap, 1..64 (default: 32)",
+    )
+    parser.add_argument(
+        "--discovery-timeout", type=positive_float,
+        help="discovery preflight timeout seconds (default: 60; endpoint: 300, maximum 600)",
     )
     auth_source = parser.add_mutually_exclusive_group()
     auth_source.add_argument(
@@ -3110,6 +4016,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--repeat", type=positive_int, default=1, help="episodes per scenario (default: 1)")
     parser.add_argument(
+        "--max-capability-failures",
+        type=positive_int,
+        help="opt-in total capability failure budget; successes do not reset it, "
+        "other failed episodes stop immediately (default: no capability limit)",
+    )
+    parser.add_argument(
         "--timeout",
         type=positive_float,
         default=180.0,
@@ -3139,15 +4051,24 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    try:
+        endpoint = endpoint_options(args)
+    except ValueError as error:
+        parser.error(str(error))
     model_provider = inferred_provider(args.model)
     opencode_auth_method = (
-        "isolated-auth-file"
+        "endpoint-environment"
+        if endpoint is not None
+        else "isolated-auth-file"
         if args.opencode_auth_file is not None
         else "isolated-auth-file-from-environment"
         if args.opencode_auth_env is not None
         else "none"
     )
-    if args.provider and model_provider and args.provider != model_provider:
+    if (
+        args.provider and model_provider and args.provider != model_provider
+        and (endpoint is None or args.agent == "opencode")
+    ):
         parser.error(
             f"--provider {args.provider!r} does not match model prefix {model_provider!r}"
         )
@@ -3206,6 +4127,8 @@ def main(argv: list[str] | None = None) -> int:
                     "repeat": repetition,
                     "cwd": str(SCENARIOS_DIR / scenario),
                     "credential_injection": opencode_auth_method,
+                    "endpoint": endpoint.metadata() if endpoint is not None else None,
+                    "terminal_harness_policy": terminal_harness_policy(args.terminal_harness),
                     "argv": build_agent_argv(
                         args.agent,
                         agent_executable,
@@ -3214,11 +4137,18 @@ def main(argv: list[str] | None = None) -> int:
                         args.codex_sandbox,
                         working_directory=SCENARIOS_DIR / scenario,
                         model_variant=args.model_variant,
+                        endpoint=endpoint,
                     ),
                 }
                 print(json.dumps(plan, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
         return 0
 
+    endpoint_secret: EndpointSecret | None = None
+    if endpoint is not None:
+        try:
+            endpoint_secret = EndpointSecret(os.environ, endpoint.key_env)
+        except ValueError as error:
+            parser.error(str(error))
     if not shutil.which(args.agent):
         parser.error(f"{args.agent!r} is not executable on PATH")
     try:
@@ -3255,7 +4185,7 @@ def main(argv: list[str] | None = None) -> int:
     agent_executable = str(Path(shutil.which(args.agent) or args.agent).resolve())
     with tempfile.TemporaryDirectory(prefix="pairmux-eval-version-") as probe_home_value:
         probe_home = Path(probe_home_value)
-        probe_env = isolated_version_probe_env(os.environ, probe_home)
+        probe_env = isolated_version_probe_env(os.environ, probe_home, endpoint=endpoint)
         agent_version = probe_version(agent_executable, env=probe_env, cwd=probe_home)
         pairmux_version = probe_version(real_pairmux, env=probe_env, cwd=probe_home)
     pairmux_sha256 = sha256_file(Path(real_pairmux))
@@ -3264,10 +4194,13 @@ def main(argv: list[str] | None = None) -> int:
     results_path = run_root / "results.jsonl"
     results: list[dict[str, object]] = []
     stop_reason: str | None = None
+    capability_failures = 0
 
     with results_path.open("w", encoding="utf-8") as results_stream:
         for scenario in scenarios:
             for repetition in range(1, args.repeat + 1):
+                episode_attempt_started_at = utc_now()
+                episode_attempt_started = time.monotonic()
                 try:
                     result = run_episode(
                         run_root=run_root,
@@ -3289,16 +4222,22 @@ def main(argv: list[str] | None = None) -> int:
                         timeout=args.timeout,
                         terminal_harness=args.terminal_harness,
                         model_variant=args.model_variant,
+                        endpoint=endpoint,
+                        endpoint_secret=endpoint_secret,
+                        discovery_timeout=args.discovery_timeout or 60.0,
                     )
                 except Exception as error:  # Normalize harness failures into auditable episodes.
                     normalized_failure = (
                         error.failure_class
-                        if isinstance(error, EpisodeCleanupError)
+                        if isinstance(error, EpisodeFailureError)
                         else "runner_error"
                     )
                     failure_root = run_root / "episodes" / f"{scenario}-r{repetition:02d}-runner-error"
                     failure_root.mkdir(parents=True, exist_ok=True)
-                    (failure_root / "traceback.log").write_text(traceback.format_exc(), encoding="utf-8")
+                    traceback_text = traceback.format_exc()
+                    if endpoint_secret is not None:
+                        traceback_text = endpoint_secret.scrub_text(traceback_text)
+                    (failure_root / "traceback.log").write_text(traceback_text, encoding="utf-8")
                     result = {
                         "schema": RESULT_SCHEMA,
                         "run_id": run_id,
@@ -3311,6 +4250,10 @@ def main(argv: list[str] | None = None) -> int:
                         "scenario": scenario,
                         "repeat": repetition,
                         "terminal_harness": args.terminal_harness,
+                        "terminal_harness_policy": terminal_harness_policy(args.terminal_harness),
+                        "endpoint": endpoint.metadata() if endpoint is not None else None,
+                        "discovery_duration_seconds": None,
+                        "agent_duration_seconds": None,
                         "score": 0.0,
                         "subgoals": [],
                         "model_variant": args.model_variant,
@@ -3318,14 +4261,21 @@ def main(argv: list[str] | None = None) -> int:
                         "outcome": "failed",
                         "steps": 0,
                         "broker_policy_rejections": 0,
-                        "wall_time_seconds": 0.0,
+                        "wall_time_seconds": round(time.monotonic() - episode_attempt_started, 6),
+                        "started_at": episode_attempt_started_at,
+                        "finished_at": utc_now(),
+                        "timeout_seconds": args.timeout,
                         "failure_class": normalized_failure,
                         "agent_observed_failure_class": None,
                         "credential_injection": {
                             "method": opencode_auth_method,
-                            "provider": model_provider if opencode_auth else None,
+                            "provider": endpoint.provider if endpoint is not None else model_provider if opencode_auth else None,
                             "verified": False,
-                            "cleanup_verified": False,
+                            "cleanup_verified": (
+                                False if normalized_failure in {
+                                    "credential_cleanup_failed", "control_cleanup_failed"
+                                } else None
+                            ),
                         },
                         "control_cleanup_failure_class": (
                             normalized_failure
@@ -3343,6 +4293,9 @@ def main(argv: list[str] | None = None) -> int:
                         "git": completed_git_provenance(git_start),
                         "paths": {"episode": relative(failure_root, run_root)},
                     }
+                    if endpoint_secret is not None:
+                        result = endpoint_secret.scrub_payload(result)
+                        assert isinstance(result, dict)
                     atomic_json(failure_root / "result.json", result)
                 results.append(result)
                 json.dump(result, results_stream, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
@@ -3358,8 +4311,20 @@ def main(argv: list[str] | None = None) -> int:
                 failure = result.get("failure_class")
                 if isinstance(failure, str) and failure in RUN_FATAL_FAILURE_CLASSES:
                     stop_reason = failure
+                elif result.get("safety_veto") is True or failure == "safety_violation":
+                    stop_reason = "safety_violation"
+                elif args.max_capability_failures is not None and result.get("pass") is not True:
+                    if isinstance(failure, str) and failure in CAPABILITY_FAILURE_CLASSES:
+                        capability_failures += 1
+                        if capability_failures >= args.max_capability_failures:
+                            stop_reason = "capability_failure_limit"
+                    else:
+                        # A bounded run never guesses unknown/infrastructure failures
+                        # into the capability budget or spends more endpoint requests.
+                        stop_reason = failure if isinstance(failure, str) else "unclassified_failure"
+                if stop_reason is not None:
                     print(
-                        f"STOP schedule failure={failure} episode={result['episode_id']}",
+                        f"STOP schedule failure={stop_reason} episode={result['episode_id']}",
                         file=sys.stderr,
                     )
                     break
@@ -3388,6 +4353,9 @@ def main(argv: list[str] | None = None) -> int:
         results=results,
         planned_episodes=len(scenarios) * args.repeat,
         stop_reason=stop_reason,
+        endpoint=endpoint,
+        endpoint_secret=endpoint_secret,
+        max_capability_failures=args.max_capability_failures,
     )
     print(run_root)
     totals = summary["totals"]
