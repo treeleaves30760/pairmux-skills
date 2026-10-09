@@ -189,10 +189,17 @@ Final local integration ran 155 tests (144 passed; 11 real-fixture tests explici
 prerequisites); those 11 separately passed with a real binary/tmux, alongside all eight goldens and
 M01/M03 three-harness overlap/tamper self-tests. Reporter regressions passed 39/39; independently
 reproduced integral-trial, pair-specific denominator and missing-source-hash defects were fixed and
-rechecked. ShellCheck and Python 3.9 grammar checks passed; actual Linux CI and Python 3.9 runtime
-coverage are not claimed.
+rechecked. ShellCheck and Python 3.9 grammar checks passed. Linux CI run
+[`37878846465`](https://github.com/treeleaves30760/pairmux-skills/actions/runs/37878846465)
+at `7087cf809c76d4731f9336d35be7ef8a20f84690` passed the same 155-test suite (11 explicit real-fixture
+skips), Python compilation, per-file shell syntax, ShellCheck and commit policy. The preceding run
+`37878364127` failed ShellCheck on two cleanup guards; explicit `if` guards fixed those warnings,
+and all eight real goldens plus M01/M03 overlap/tamper self-tests passed again without weakening CI.
+Actual Python 3.9 runtime coverage is not claimed.
 The revised event-gated M01/M03 hashes and explicit safety-veto protocol must not be pooled with
-the historical pilot below. Documentation HTTPS and v0.6.0 publication remain pending separately.
+the historical pilot below. Documentation HTTPS was completed by the operator on 2026-10-09;
+a public HTTPS read of the Getting Started page succeeded. v0.6.0 publication remains pending
+separately.
 
 ## Headless acceptance status (P4 exit criteria)
 
