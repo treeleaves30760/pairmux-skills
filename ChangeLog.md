@@ -167,5 +167,6 @@ CLIs can use manual skill installation; this skill release does not require new 
   behavior, and covers Bash/zsh hooks, Fish 4+ native OSC 133, Fish-safe sentinel fallback, and doctor
   completion tiers without conflating tiers with envelope modes.
 
-[Unreleased]: https://github.com/treeleaves30760/pairmux-skills/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/treeleaves30760/pairmux-skills/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/treeleaves30760/pairmux-skills/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/treeleaves30760/pairmux-skills/releases/tag/v0.1.0
