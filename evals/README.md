@@ -25,6 +25,21 @@ Code, and Codex. Each scenario is a directory with three files:
 | S09 | hung command | interrupt with Ctrl-C, recover the same terminal |
 | S10 | note relay | read a human's note and act on it |
 
+## Command-planning checks
+
+[`evals.json`](evals.json) contains three small skill-creator-style prompts with expectations:
+Windows program readiness, owning-endpoint worker notes, and human-handoff privacy. Run each
+prompt with the canonical skill and a saved earlier skill as separate contexts, saving the written
+command plan and grading it against the expectations. Do **not** execute those planned commands.
+These fixtures are separate from `run.py`'s S/M scenarios; command-plan grades are not terminal
+execution results, native Windows acceptance, or statistically reliable model benchmarks.
+
+The deterministic companion checks run without a model:
+
+```bash
+python3 -m unittest discover -s evals/tests -p test_skill_guidance.py
+```
+
 ## Prerequisites
 
 - `tmux >= 3.2`, `python3`, `curl`, and `bash`.

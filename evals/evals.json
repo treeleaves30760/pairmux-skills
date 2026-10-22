@@ -1,0 +1,85 @@
+{
+  "skill_name": "pairmux",
+  "evals": [
+    {
+      "id": 1,
+      "name": "windows-program-readiness",
+      "prompt": "Plan the next commands for this terminal task; do not actually execute them. I am using pairmux 1.0.0 on native Windows 11 without tmux. The terminal shell is PowerShell. I started `pairmux new --name api --cmd \"python -m http.server 8765\"`, and `pairmux log api` already contains `Serving HTTP on ... port 8765`. Check that the server is usable and keep it available for my browser. Also show how to inspect the terminal if it stops responding. Provide concrete commands in the correct host shell syntax and briefly explain how you decide readiness. Do not install software or recreate the terminal.",
+      "expected_output": "Use the existing ready output and a separate PowerShell HTTP request, inspect the program with peek/log, and leave it running. Do not wait for a past readiness line, use shell-only run/done on the program terminal, or require tmux/WSL.",
+      "files": [],
+      "expectations": [
+        "Uses native Windows/PowerShell without requiring tmux, WSL, installation, or terminal recreation.",
+        "Uses already recorded readiness and a separate HTTP probe; does not wait for the past readiness line.",
+        "Does not issue run or wait --done against the api program terminal.",
+        "Uses peek/log for inspection and leaves the server available rather than killing or interrupting it."
+      ]
+    },
+    {
+      "id": 2,
+      "name": "nested-worker-note",
+      "prompt": "Plan the exact commands, without executing them. A coordinator created a persistent coding-agent UI with `pairmux --socket team new --name worker --cmd \"agent-ui\"`. Its Stop hook runs INSIDE that terminal; PAIRMUX_NAME is worker and PAIRMUX_SOCKET is a different nested endpoint. I want the hook to signal that a turn has finished, and the coordinator to block until that signal without polling or terminating the UI. Give the hook command and the coordinator wait command, explain which endpoint each uses, and describe what happens when the coordinator sends the next request and waits for the next turn.",
+      "expected_output": "The hook explicitly addresses the owning team endpoint rather than the pane's nested default; the coordinator waits for a note on team/worker. Do not use shell command completion for a persistent UI. A send starts a new observation window rather than replaying the previous turn's note.",
+      "files": [],
+      "expectations": [
+        "The in-pane hook explicitly sends note to owning endpoint team and terminal worker, not the nested default.",
+        "The coordinator explicitly waits for worker --note on endpoint team, without polling, --human, or --done.",
+        "The next request uses send on team/worker before the next --note wait and explains that the old note is no longer replayed.",
+        "Keeps the persistent UI alive and distinguishes a turn note from shell/process completion."
+      ]
+    },
+    {
+      "id": 3,
+      "name": "human-handoff-boundaries",
+      "prompt": "Plan the next commands; do not execute them. Keep my existing shell terminal `migrate` and its environment. A migration reached a password prompt, so I took over through attach. The agent's `pairmux wait migrate --human --notify` returned `status: human-done` with `output: \"MFA step answered; the migration may still be running\"`. Does that mean the migration succeeded, and what should the agent do next? If a later run in this same shell is confirmed hung, show the recovery sequence without discarding the session. Explain what this handoff result does and does not guarantee about secrets in terminal history. Do not ask for, invent, or type a credential.",
+      "expected_output": "Treat human-done as a note, not migration completion; check state without exposing the sensitive span. Use ordinary completion waits only if the whole command span is known safe, otherwise seek non-sensitive human confirmation. Understand that resumed/completed handoff suppresses terminal spans but note output and journal are not universal redaction. Recover with supported Ctrl-C and an idle wait in the same session, not invalid keys or kill/recreate.",
+      "files": [],
+      "expectations": [
+        "Treats human-done output as a note rather than proof of command success or exit status.",
+        "Checks current state without automatically exposing the sensitive span, and avoids a pure --done wait on an already-idle shell.",
+        "Explains resumed/completed handoff span suppression without promising that notes, screen, or journal are redacted or secret-free.",
+        "Recovers the same shell with supported C-c followed by an idle wait; does not kill/recreate or recommend unsupported C-backslash."
+      ]
+    },
+    {
+      "id": 4,
+      "name": "slow-build-startup-before-context-switch",
+      "prompt": "Plan the next commands and decisions; do not execute them. My existing pairmux shell terminal `release` has the venv and signing-free build environment configured. Start `make release` there, then review CHANGELOG.txt in another tool while the build runs; the full build can take fifteen minutes. Nothing has been launched yet. Explain the first observation deadline and what you check before switching tasks or waiting for the rest of the build. Account for an initial reply that has no output, an early configuration error, or normal compile progress. Preserve the terminal and do not rerun the build just to inspect it.",
+      "expected_output": "Submit the quoted command in the existing shell, estimate time to the first meaningful signal rather than full runtime, and use an initial bounded run/wait generally around 30s or shorter for a fast signal. Examine returned output/status or safe peek before unrelated work or a long wait. Normal progress can establish healthy startup; silence/running alone cannot. Timeout is not command failure. Diagnose missing evidence or errors rather than blindly escalating waits, sleeping in a polling loop, or rerunning.",
+      "files": [],
+      "expectations": [
+        "Submits make release in the existing release shell before waiting or reviewing unrelated files; does not recreate the terminal or rerun for output.",
+        "Estimates time to the first meaningful signal, not the fifteen-minute total, and uses an initial bounded run/wait generally 30s or shorter if appropriate.",
+        "Inspects returned output/status or a safe peek and verifies healthy startup before unrelated work or a long completion wait.",
+        "Treats silence or running alone as unknown rather than healthy, and distinguishes a timeout from command failure or a reported configuration error.",
+        "Prefers event-aware bounded observation, reassesses missing evidence, and avoids automatic deadline escalation or repeated blind sleep/poll loops."
+      ]
+    },
+    {
+      "id": 5,
+      "name": "ready-in-initial-run-no-extra-wait",
+      "prompt": "Plan what to do next; do not execute anything. In an existing pairmux shell terminal `web`, I ran `pairmux run web \"npm run dev -- --host 127.0.0.1\" --timeout 5s`. It returned status running and output `VITE ready in 700 ms` plus `Local: http://127.0.0.1:5173/`, with no error. Open the app for a smoke check and then work on the CSS while keeping the server alive. Do you need another startup wait, and how would you check readiness and choose any next observation? The terminal output is non-sensitive.",
+      "expected_output": "Use the evidence already returned by the bounded run; do not impose an additional 30s wait or wait for a past readiness pattern. Check the app through its URL as the requested smoke test and proceed with independent work after the returned readiness evidence and relevant probe. Keep the server alive and prefer bounded event-aware observations only if new uncertainty requires them.",
+      "files": [],
+      "expectations": [
+        "Recognizes that the initial bounded run already returned healthy-startup evidence and explicitly avoids a redundant startup wait or unconditional 30s delay.",
+        "Uses the returned readiness output and a separate browser/HTTP smoke check instead of waiting for the already-printed VITE readiness pattern.",
+        "Keeps the server alive without rerunning, interrupting, killing, or waiting for the dev server to complete before the requested CSS work.",
+        "Does not substitute a sleep or repeated blind polling for available evidence or a suitable bounded observation if further evidence is needed."
+      ]
+    },
+    {
+      "id": 6,
+      "name": "credential-passive-and-fallback-waits",
+      "prompt": "Plan the observations for these three items; do not execute them. (1) A shell terminal `migrate` is at a password prompt. Its `pairmux wait migrate --human --notify` reached the default timeout before I answered; the next hint offers the same flags with 10m0s. I still intend to answer through attach, and the terminal/history may contain secrets. (2) I intentionally want to listen for a future completion on the currently idle shell `review`; another person will start its next command later, and there is no new launch for me to validate. (3) An external helper is not a pairmux terminal: its custom client exposes only a nonblocking, non-sensitive status snapshot, with no suitable blocking/event observation available. Its first snapshot says starting; the first useful status normally arrives within a couple of seconds. Explain whether each can use the same short startup schedule, and how to avoid blind polling or exposing secrets.",
+      "expected_output": "Keep the credential handoff at at least 300s and repeat its longer --human --notify wait; the 30s startup rule does not apply and no secret span is read. An intentional passive shell subscription may use --done --timeout 600s despite idle, with clear future-completion semantics. For the helper only, a brief bounded sleep followed by a safe status check is a permitted fallback because no suitable blocking observation exists; assess the result rather than repeating blind polls or declaring starting healthy.",
+      "files": [],
+      "expectations": [
+        "Repeats the credential handoff with --human --notify and at least 300s (the offered 10m0s is valid), explicitly excluding it from the 30s startup rule.",
+        "Does not type, guess, retrieve credentials, or inspect the sensitive terminal/history with peek/log or a whole-command output wait.",
+        "Allows an intentional passive wait review --done --timeout 600s and explains that idle subscribes to a future completion, not an old result or guaranteed success.",
+        "Permits only a brief fallback sleep for the helper because no suitable blocking observation exists, followed by a safe check and reassessment rather than repeated blind polling.",
+        "Does not treat the helper's starting or silent/unknown state as verified health, and prefers event-aware bounded observation wherever it is available."
+      ]
+    }
+  ]
+}
