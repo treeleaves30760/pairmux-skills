@@ -7,8 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-23
+
+Compatible terminal workflows: pairmux CLI >=1.0.0, <2.0.0. The `-t` alias, additional install
+targets, and CLI-version/bundle-SHA-256 installer report require CLI >=1.1.0. Older compatible
+CLIs can use manual skill installation; this skill release does not require new terminal APIs.
+
 ### Added
 
+- Three more command-planning cases cover startup health before a context switch, readiness already
+  returned by `run`, and credential/passive-subscription/brief-sleep exceptions; model-free regressions
+  check the observation sequence, consistent summaries, bounded examples and unchanged handoff safety.
+- Document the installer `-t` alias and verified `cline`, `roo-code`, `kilo-code`, and `droid` targets.
+- Three reproducible command-planning eval prompts for native Windows readiness,
+  nested worker notes and human-handoff privacy. These are not cross-platform runtime
+  acceptance results or a statistically reliable model benchmark.
+- Deterministic, model-free canonical guidance checks for backend/shell precedence, terminal kinds,
+  completion/pattern waits, owning-socket notes, handoff privacy and offline installer refresh.
 - Dated clean-checkout Qwen P4 evidence with the verified public pairmux 0.6.0 binary: Claude
   S01–S09 passed 7/9, remained ineligible and stopped at the total two-failure budget. Codex's
   seven episodes and the 24-episode M calibration were not started; historical raw runs remain unchanged.
@@ -28,6 +43,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Submit work before observation, estimate time to the first meaningful signal, and generally use a
+  bounded 30s initial `run`/`wait` (shorter for fast signals). Inspect returned evidence or safe output
+  and verify healthy startup before unrelated work or long waits; do not add redundant waits, treat
+  silence as health, or automatically escalate on timeout. Prefer event-aware observation; allow a
+  brief sleep only when no suitable blocking observation exists, never repeated blind polling.
+  Credential handoffs remain `--human --notify` at ≥300s with no secret-span reads, explicitly outside
+  the 30s rule; 600s subscriptions remain valid after verified startup or for intentional passive listening.
+- Refresh the concise canonical skill and four references against v1.0: optional tmux/native Windows
+  runtime, actual shell precedence, shell completion versus program observation, future-only pattern
+  waits, raw-mode inference limits and valid in-place Ctrl-C recovery keys.
+- Correct nested note routing with a creator-supplied owning-socket recipe, and distinguish handoff
+  note/resume/completion outcomes without promising redaction or journal secrecy.
+- Document the five-file build-time offline installer bundle, CLI-version/SHA-256 provenance,
+  managed-file replacement/extra-file preservation, fresh-executable refresh, target-root skips,
+  CWD-relative Cursor, legacy Codex and dev-build update limits; align the fallback use threshold.
 - Preserve the historical prepublication checkpoint while recording completed v0.6.0 publication,
   actual public-platform acceptance and documentation deployment separately from model results.
 - M01/M03 use task-relevant logical overlap checkpoints, preserving existing subgoal IDs while new
@@ -137,5 +167,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behavior, and covers Bash/zsh hooks, Fish 4+ native OSC 133, Fish-safe sentinel fallback, and doctor
   completion tiers without conflating tiers with envelope modes.
 
-[Unreleased]: https://github.com/treeleaves30760/pairmux-skills/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/treeleaves30760/pairmux-skills/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/treeleaves30760/pairmux-skills/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/treeleaves30760/pairmux-skills/releases/tag/v0.1.0
