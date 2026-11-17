@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The `events` entry in the command reference lists `--exit-with-parent` and the `interrupted`
+  status of `events --wait` (pairmux CLI after 1.3.0); rerun an interrupted wait instead of
+  lengthening its timeout.
+
 ## [0.4.0] - 2026-11-17
 
 Requires pairmux CLI >=1.3.0 for the `events` guidance; the hierarchy guidance still requires
