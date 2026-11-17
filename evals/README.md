@@ -27,8 +27,9 @@ Code, and Codex. Each scenario is a directory with three files:
 
 ## Command-planning checks
 
-[`evals.json`](evals.json) contains three small skill-creator-style prompts with expectations:
-Windows program readiness, owning-endpoint worker notes, and human-handoff privacy. Run each
+[`evals.json`](evals.json) contains small skill-creator-style prompts with expectations:
+Windows program readiness, in-pane `report` turn notes, human-handoff privacy, and agent-hierarchy
+scope (paths, `report`, `E_SCOPE`). Run each
 prompt with the canonical skill and a saved earlier skill as separate contexts, saving the written
 command plan and grading it against the expectations. Do **not** execute those planned commands.
 These fixtures are separate from `run.py`'s S/M scenarios; command-plan grades are not terminal

@@ -17,6 +17,7 @@ pairmux-skills/
       interactive.md      # REPLs, pagers, [y/N], the never-guess-secrets rule
       collaboration.md    # attach / watch / note and the human handoff loop
       troubleshooting.md  # E_BUSY, dead terminals, wait gotchas, sentinel mode
+      hierarchy.md        # sub-agents as a tree: paths, ls --tree, report, E_SCOPE
   install-map.md          # per-agent skills paths (verified) + AGENTS.md fallback template
   evals/
     scenarios/S01..S10/   # setup.sh + TASK.md + check.sh each
@@ -55,7 +56,7 @@ pairmux skill install -t cline                 # -t aliases --target
 pairmux skill install --target all --dry-run    # show the paths it would write
 ```
 
-The executable embeds the **five canonical files at build time** (SKILL.md + four references).
+The executable embeds the **six canonical files at build time** (SKILL.md + five references).
 Installation is **offline**: it uses that executable's bundle, not a network source or remote latest.
 The report shows the embedded CLI version and bundle SHA-256. Each run replaces managed same-name
 files (including local edits) and preserves extra files; back up edits first.

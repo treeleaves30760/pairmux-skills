@@ -16,7 +16,7 @@ class SkillGuidanceTests(unittest.TestCase):
         cls.main = (SKILL / "SKILL.md").read_text(encoding="utf-8")
         cls.refs = {
             name: (SKILL / "references" / f"{name}.md").read_text(encoding="utf-8")
-            for name in ("commands", "interactive", "collaboration", "troubleshooting")
+            for name in ("commands", "interactive", "collaboration", "troubleshooting", "hierarchy")
         }
         cls.install = (ROOT / "install-map.md").read_text(encoding="utf-8")
         cls.readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -155,14 +155,24 @@ class SkillGuidanceTests(unittest.TestCase):
         self.assertIn("pairmux wait repl --idle 800", self.refs["interactive"])
         self.assertIn("not proof", self.refs["interactive"])
 
-    def test_nested_notes_address_the_creator_supplied_owner(self) -> None:
+    def test_nested_notes_use_report_to_reach_the_owner(self) -> None:
         collaboration = self.refs["collaboration"]
-        self.assertIn("pairmux --socket team note worker", collaboration)
-        self.assertIn("pairmux --socket team wait worker --note", collaboration)
-        self.assertIn("child endpoint", collaboration)
-        self.assertIn("creator", collaboration)
+        self.assertIn('pairmux report "turn complete"', collaboration)
+        self.assertIn("pairmux wait worker --note", collaboration)
+        self.assertIn("child layer", collaboration)
+        self.assertIn("pairmux report", self.main)
         self.assertNotIn('pairmux note "$PAIRMUX_NAME"', self.guidance)
-        self.assertNotRegex(self.guidance, r"PAIRMUX_(?:PARENT|OWNER)_SOCKET")
+        self.assertNotRegex(self.guidance, r"PAIRMUX_PARENT_SOCKET")
+
+    def test_hierarchy_keeps_control_flowing_down(self) -> None:
+        hierarchy = self.refs["hierarchy"]
+        for detail in ("E_SCOPE", "ls --tree", "api/tests", "pairmux report", "wait api,web --note",
+                       "program terminal", "Never unset or rewrite `PAIRMUX_SCOPE`", "do not launch it yourself"):
+            self.assertIn(detail, hierarchy)
+        self.assertIn("E_SCOPE", self.refs["commands"])
+        self.assertIn("E_SCOPE", self.refs["troubleshooting"])
+        self.assertIn("never unset", self.main.lower())
+        self.assertIn("`tui`", self.main)
 
     def test_handoff_does_not_promise_redaction_or_auto_peek(self) -> None:
         collaboration = self.refs["collaboration"]

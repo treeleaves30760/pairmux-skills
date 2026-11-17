@@ -7,7 +7,7 @@ skills directory as `.../skills/pairmux/`. No per-agent rewrite; the same folder
 ```
 <agent skills dir>/pairmux/
   SKILL.md
-  references/{commands,interactive,collaboration,troubleshooting}.md
+  references/{commands,interactive,collaboration,troubleshooting,hierarchy}.md
 ```
 
 ## Verified paths (new targets checked 2026-10-22)
@@ -153,8 +153,9 @@ non-interactive builds/tests often fit your harness's background execution just 
   explicitly excluded from the 30s startup rule. Repeat after client interruption/timeout.
   Resumed is not completed; a note is not completion. Never put credentials in notes or automatically
   read a sensitive span, including for startup checks; handoff is not redaction.
-- Inside a pane, PAIRMUX_SOCKET is a child endpoint. The creator supplies the owning endpoint for
-  `pairmux --socket <owner> note <name> "turn complete"`; do not infer a parent socket.
+- Inside a pane, PAIRMUX_SOCKET is a child layer; tell the creator with `pairmux report "turn complete"`.
+  Drive your own layer and below (paths like `api/tests`, `ls --tree`); anything above or beside is
+  `E_SCOPE` by design — never bypass it.
 - Ordinary CLI replies support `--json` envelopes (help stays text; MCP uses JSON-RPC). Read `next`
   in order, obey safety/prose, replace placeholders, choose an applicable command, and read `notes`.
 - Full reference: the `pairmux` skill (SKILL.md + references/) or `pairmux help`.

@@ -17,13 +17,13 @@
     {
       "id": 2,
       "name": "nested-worker-note",
-      "prompt": "Plan the exact commands, without executing them. A coordinator created a persistent coding-agent UI with `pairmux --socket team new --name worker --cmd \"agent-ui\"`. Its Stop hook runs INSIDE that terminal; PAIRMUX_NAME is worker and PAIRMUX_SOCKET is a different nested endpoint. I want the hook to signal that a turn has finished, and the coordinator to block until that signal without polling or terminating the UI. Give the hook command and the coordinator wait command, explain which endpoint each uses, and describe what happens when the coordinator sends the next request and waits for the next turn.",
-      "expected_output": "The hook explicitly addresses the owning team endpoint rather than the pane's nested default; the coordinator waits for a note on team/worker. Do not use shell command completion for a persistent UI. A send starts a new observation window rather than replaying the previous turn's note.",
+      "prompt": "Plan the exact commands, without executing them. A coordinator created a persistent coding-agent UI with `pairmux new --name worker --cmd \"agent-ui\"`. Its Stop hook runs INSIDE that terminal; PAIRMUX_NAME is worker and PAIRMUX_SOCKET is a different nested endpoint. I want the hook to signal that a turn has finished, and the coordinator to block until that signal without polling or terminating the UI. Give the hook command and the coordinator wait command, explain which layer each addresses, and describe what happens when the coordinator sends the next request and waits for the next turn.",
+      "expected_output": "The hook runs `pairmux report` (which writes to worker's own row in the owner's layer) rather than a bare note on the pane's nested default or a hand-built --socket; the coordinator waits for a note on worker. Do not use shell command completion for a persistent UI. A send starts a new observation window rather than replaying the previous turn's note.",
       "files": [],
       "expectations": [
-        "The in-pane hook explicitly sends note to owning endpoint team and terminal worker, not the nested default.",
-        "The coordinator explicitly waits for worker --note on endpoint team, without polling, --human, or --done.",
-        "The next request uses send on team/worker before the next --note wait and explains that the old note is no longer replayed.",
+        "The in-pane hook uses pairmux report, not a bare note on the nested default and not an invented or hand-derived owner socket.",
+        "The coordinator explicitly waits for worker --note, without polling, --human, or --done.",
+        "The next request uses send on worker before the next --note wait and explains that the old note is no longer replayed.",
         "Keeps the persistent UI alive and distinguishes a turn note from shell/process completion."
       ]
     },
@@ -79,6 +79,19 @@
         "Allows an intentional passive wait review --done --timeout 600s and explains that idle subscribes to a future completion, not an old result or guaranteed success.",
         "Permits only a brief fallback sleep for the helper because no suitable blocking observation exists, followed by a safe check and reassessment rather than repeated blind polling.",
         "Does not treat the helper's starting or silent/unknown state as verified health, and prefers event-aware bounded observation wherever it is available."
+      ]
+    },
+    {
+      "id": 7,
+      "name": "agent-hierarchy-scope",
+      "prompt": "Plan the exact commands, without executing them. You are a coding agent running inside pairmux terminal `api`, which a lead agent created; PAIRMUX_SCOPE is set. You need a helper shell to run `go test ./...`, and you also want to (a) tell the lead that the API is done and (b) check what the sibling terminal `web` is doing. Separately, as the lead agent, you want to read the screen of `api`'s helper terminal `tests` and wait until either `api` or `web` reports. Give the commands for both roles and explain any command pairmux will refuse.",
+      "expected_output": "As api: create the helper with plain `pairmux new --name tests` (own layer), run the tests there, and use `pairmux report` to tell the lead. Inspecting the sibling `web` is outside api's scope (E_SCOPE) and must not be attempted by changing --socket/PAIRMUX_SOCKET or unsetting PAIRMUX_SCOPE; ask the lead via report instead. As lead: `pairmux peek api/tests` by path and `pairmux wait api,web --note`.",
+      "files": [],
+      "expectations": [
+        "The worker creates and drives its helper in its own layer (new --name tests; run tests ...), without --socket.",
+        "The worker reports upward with pairmux report and treats reaching the sibling web as refused (E_SCOPE), without bypassing the scope.",
+        "The lead reads the grandchild by path (pairmux peek api/tests) rather than deriving endpoint names.",
+        "The lead waits on both workers with one note wait (pairmux wait api,web --note) instead of polling or --done."
       ]
     }
   ]
