@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-17
+
+Requires pairmux CLI >=1.3.0 for the `events` guidance; the hierarchy guidance still requires
+CLI >=1.2.0 and all other guidance is unchanged for CLI >=1.0.0.
+
+### Added
+
+- Guidance for supervising sub-agents without polling: `pairmux events --tree --wait --status
+  awaiting-input,dead` in SKILL.md, the hierarchy recipe and the cheat-sheet, and an `events` entry
+  in the command reference (stream versus `--wait`, envelope fields, MCP `pairmux_events`).
+
 ## [0.3.0] - 2026-11-17
 
 Requires pairmux CLI >=1.2.0 for the hierarchy guidance (`report`, `ls --tree`, terminal paths,
@@ -193,7 +204,8 @@ CLIs can use manual skill installation; this skill release does not require new 
   behavior, and covers Bash/zsh hooks, Fish 4+ native OSC 133, Fish-safe sentinel fallback, and doctor
   completion tiers without conflating tiers with envelope modes.
 
-[Unreleased]: https://github.com/treeleaves30760/pairmux-skills/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/treeleaves30760/pairmux-skills/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/treeleaves30760/pairmux-skills/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/treeleaves30760/pairmux-skills/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/treeleaves30760/pairmux-skills/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/treeleaves30760/pairmux-skills/releases/tag/v0.1.0
