@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-17
+
+Requires pairmux CLI >=1.2.0 for the hierarchy guidance (`report`, `ls --tree`, terminal paths,
+`PAIRMUX_SCOPE`); all other guidance is unchanged for CLI >=1.0.0.
+
+### Added
+
+- `references/hierarchy.md`: driving other coding agents as a tree — sub-agents as program
+  terminals, path addressing (`api/tests`), `ls --tree`, `wait a,b --note` on worker reports,
+  `report` as the only upward channel, and `E_SCOPE` as a boundary never to bypass.
+- SKILL.md: a "Driving other agents" section, `report`/`ls --tree`/`tui` in the cheat-sheet,
+  `E_SCOPE` among the error codes, and orchestration in the description.
+- `agent-hierarchy-scope` command-planning eval and a model-free check that the guidance keeps
+  control flowing down.
+
+### Changed
+
+- In-pane turn notes use `pairmux report "..."` instead of a creator-supplied
+  `--socket <owner> note <name>` (still accepted by the CLI); the `nested-worker-note` eval,
+  collaboration recipe, troubleshooting and install-map AGENTS.md template follow.
+- References document `PAIRMUX_SCOPE` / `PAIRMUX_OWNER_SOCKET`, `report`'s `reported` status and
+  `pairmux tui` as a human-only interface.
+- References note that a bare `pairmux ls` (alias `list`) at a person's interactive terminal opens
+  the TUI, while agents, pipes, `--json`, `--plain` and `PAIRMUX_NO_TUI=1` get the listing; agents
+  point a human at the manager with "run `pairmux ls`".
+
 ## [0.2.0] - 2026-10-23
 
 Compatible terminal workflows: pairmux CLI >=1.0.0, <2.0.0. The `-t` alias, additional install
@@ -167,6 +193,7 @@ CLIs can use manual skill installation; this skill release does not require new 
   behavior, and covers Bash/zsh hooks, Fish 4+ native OSC 133, Fish-safe sentinel fallback, and doctor
   completion tiers without conflating tiers with envelope modes.
 
-[Unreleased]: https://github.com/treeleaves30760/pairmux-skills/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/treeleaves30760/pairmux-skills/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/treeleaves30760/pairmux-skills/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/treeleaves30760/pairmux-skills/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/treeleaves30760/pairmux-skills/releases/tag/v0.1.0
