@@ -20,8 +20,9 @@ pairmux-skills/
       hierarchy.md        # sub-agents as a tree: paths, ls --tree, report, E_SCOPE
   install-map.md          # per-agent skills paths (verified) + AGENTS.md fallback template
   evals/
-    scenarios/S01..S10/   # setup.sh + TASK.md + check.sh each
-    README.md  RESULTS.md  lib.sh
+    scenarios/S01..S10/   # setup.py + TASK.md + check.py each (M01..M08: multi-task suite)
+    evallib.py            # shared cross-platform helpers for every setup/check/golden script
+    README.md  RESULTS.md  run.py  test_scenarios.py
   ChangeLog.md  LICENSE
 ```
 
@@ -89,9 +90,9 @@ the pairmux CLI repository.
 
 Ten scenario cards check that an agent uses pairmux correctly — the basic loop, slow commands without
 `sleep`, finding one error in a huge log, confirmations, the never-guess-secrets rule, REPLs, pagers,
-multi-terminal server work, Ctrl-C recovery, and note relay. Each has a `setup.sh`, a natural-language
-`TASK.md` (which never names a pairmux subcommand), and a `check.sh` that asserts the outcome and greps
-the transcript for anti-patterns. See [`evals/README.md`](evals/README.md) for the OpenCode, Claude
+multi-terminal server work, Ctrl-C recovery, and note relay. Each has a `setup.py`, a natural-language
+`TASK.md` (which never names a pairmux subcommand), and a `check.py` that asserts the outcome and
+searches the transcript for anti-patterns. The scenarios run natively on macOS, Linux and Windows. See [`evals/README.md`](evals/README.md) for the OpenCode, Claude
 Code, and Codex runners and scoring, and [`evals/RESULTS.md`](evals/RESULTS.md) for recorded runs.
 
 ## Requirements
@@ -101,10 +102,19 @@ macOS/Linux auto uses available tmux 3.2+ or built-in PTYs; native Windows 10 18
 ConPTY. tmux, bash and WSL are not universal runtime prerequisites; use your selected shell's syntax.
 An existing built-in endpoint remains selected unless tmux also runs there.
 
-**Repository eval fixtures:** POSIX shell/bash, `tmux >= 3.2`, `python3`, `curl` and a compatible
-`pairmux` binary for the real-terminal scenarios. These fixture requirements are separate from runtime
-support; Windows users need a suitable POSIX environment (such as WSL) for those scenarios. Model-free
-Python unit tests do not require a paid model or all real-terminal prerequisites.
+**Repository eval fixtures:** Python 3 and a compatible `pairmux` binary on every platform. The
+scenario control scripts are Python, so the same implementation runs everywhere:
+
+- **macOS/Linux:** `python3`, `curl`, and a POSIX shell for the agent-facing shell fixtures. pairmux
+  uses tmux 3.2+ when installed (the `rawtmux` comparison baseline and the tmux reference goldens
+  need it), otherwise its built-in PTY multiplexer.
+- **Windows 10 1809+ (native, no WSL):** pairmux's built-in ConPTY multiplexer with PowerShell;
+  scenarios swap their POSIX shell fixtures for Python twins and get Windows-worded tasks. `curl.exe`
+  (bundled with Windows) is used by M08. The `rawtmux` harness is the only part that does not run
+  there: it is a raw-tmux comparison baseline, not a product feature, and tmux does not run on Windows.
+
+Model-free Python unit tests do not require a paid model or all real-terminal prerequisites; CI runs
+them and the golden scenario self-test on Linux and on native Windows.
 
 ## License
 

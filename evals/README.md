@@ -4,13 +4,28 @@ Ten scenario cards that check whether an agent, driving only its normal shell to
 `pairmux` skill, uses pairmux correctly. `run.py` executes them repeatably across OpenCode, Claude
 Code, and Codex. Each scenario is a directory with three files:
 
-- **`setup.sh`** — creates an isolated environment and any materials, writing an `env.sh`. Manual runs
+- **`setup.py`** — creates an isolated environment and any materials, writing an `env.sh`. Manual runs
   use the scenario's `state/`; the automated runner injects a unique socket and state directory.
   Some scenarios pre-create a terminal in a starting state (a stuck pager, a hung command, a note).
 - **`TASK.md`** — the natural-language task handed to the agent. It never names a pairmux subcommand;
   choosing `run`/`wait`/`send`/… is the skill's job.
-- **`check.sh [transcript]`** — asserts the outcome (via `pairmux --json` and the journal files) and,
-  when a transcript path is given, greps it for anti-patterns like `sleep`. Exit 0 = pass.
+- **`check.py [transcript]`** — asserts the outcome (via `pairmux --json` and the journal files) and,
+  when a transcript path is given, searches it for anti-patterns like `sleep`. Exit 0 = pass.
+
+The control scripts (`setup.py`, `check.py`, and the M suite's `golden.py`/`human.py`) are Python and
+share [`evallib.py`](evallib.py), so one implementation runs on macOS, Linux and native Windows. Run
+them with the interpreter you run `run.py` with, isolated: `python3 -I setup.py` (`python -I setup.py`
+on Windows). The generated `env.sh` is data only — `export NAME=value` lines that a POSIX shell can
+source for a manual run and that `check.py` parses without evaluating anything.
+
+**Windows.** pairmux runs on its built-in ConPTY multiplexer (no tmux, no WSL) and terminals open in
+PowerShell. A scenario whose fixtures are POSIX shell scripts carries a `windows/` overlay: Python twins
+with the same behavior (`slow-build.sh` → `python slow-build.py`, …) and a `windows/TASK.md` worded for
+PowerShell. On Windows the agent's worktree gets the overlay instead of the `*.sh` fixtures; macOS and
+Linux never see it, so their episodes, tasks and scores are unchanged. Fixtures that record which live
+terminal they ran in use `termsupport.py` (copied in by setup): on POSIX it returns exactly the
+`ppid`/`sid`/`/dev/tty…` facts it always did; on Windows the shell PID, the console's top process and a
+`console:<pid>` name stand in for them.
 
 | # | scenario | what it exercises |
 |---|----------|-------------------|
@@ -43,9 +58,15 @@ python3 -m unittest discover -s evals/tests -p test_skill_guidance.py
 
 ## Prerequisites
 
-- `tmux >= 3.2`, `python3`, `curl`, and `bash`.
-- An explicit `--pairmux-bin`, a built sibling `../pairmux/bin/pairmux`, or `pairmux` on `PATH` (in
-  that precedence order). The resolved binary path and SHA-256 are recorded in every result.
+- Python 3 (the runner, control scripts and Windows fixture twins are stdlib-only).
+- macOS/Linux: a POSIX shell, `curl`, and `tmux >= 3.2` for the `rawtmux`/`shell` baselines and the
+  tmux reference goldens (pairmux itself falls back to its built-in PTY multiplexer without tmux).
+- Windows 10 1809+: PowerShell and `curl.exe` (both ship with Windows). No tmux, bash or WSL. M04's
+  activation script is a `.ps1`, so the PowerShell execution policy must allow local scripts
+  (`RemoteSigned`, or `Set-ExecutionPolicy -Scope Process Bypass` in that terminal).
+- An explicit `--pairmux-bin`, a built sibling `../pairmux/bin/pairmux` (`pairmux.exe` on Windows), or
+  `pairmux` on `PATH` (in that precedence order). The resolved binary path and SHA-256 are recorded in
+  every result.
 - For manual runs, install the skill into the agent under test per [`install-map.md`](../install-map.md).
   The automated runner uses a fresh HOME/config root and installs only this checkout's canonical skill.
 
@@ -53,16 +74,20 @@ python3 -m unittest discover -s evals/tests -p test_skill_guidance.py
 
 ```bash
 cd evals/scenarios/S01
-./setup.sh                 # builds the isolated env + writes env.sh
-source ./env.sh            # so THIS shell (and the agent it launches) share the socket/state
+python3 -I setup.py                  # builds the isolated env + writes env.sh
+. ./env.sh                           # so THIS shell (and the agent it launches) share the socket/state
 # ... let the agent perform TASK.md against pairmux ...
-./check.sh                 # outcome-only
-./check.sh transcript.txt  # outcome + anti-pattern grep
+python3 -I check.py                  # outcome-only
+python3 -I check.py transcript.txt   # outcome + anti-pattern search
 ```
 
+On Windows, run `python -I setup.py` in PowerShell; it prints the `$env:NAME = '…'` lines to paste
+instead of sourcing `env.sh`, copies the `windows/` fixture twins next to the task, and the agent
+should follow `windows/TASK.md`.
+
 Because `env.sh` exports `PAIRMUX_SOCKET`/`PAIRMUX_STATE_DIR`/`PATH`, the agent process launched from
-this shell inherits them and its `pairmux` calls hit the isolated socket. `check.sh` sources the same
-`env.sh`. Re-running `setup.sh` wipes the previous run (`tmux -L <sock> kill-server` + fresh `state/`).
+this shell inherits them and its `pairmux` calls hit the isolated socket. `check.py` reads the same
+`env.sh`. Re-running `setup.py` wipes the previous run (stops that socket's terminals + fresh `state/`).
 
 ## Automated runner
 
@@ -311,6 +336,19 @@ invalidate a later valid call. Relative/nonexistent cwd values, malformed fields
 descriptor errors, changed binaries, and all other protocol failures remain fatal. The ledgers are
 serialized only after the agent process group has ended and never scan agent JSON files.
 
+On Windows, which has no Unix descriptor passing, the same broker listens on a random named pipe
+(address in `runtime/broker.pipe`). It takes the client PID from the kernel
+(`GetNamedPipeClientProcessId`), requires the client's token user SID to match the runner's, and
+duplicates the client's stdin/stdout/stderr handles out of that process for the pairmux child, so
+the request schema, ledger and output behavior are unchanged. The `pairmux` on the agent's PATH is a
+real `pairmux.exe` console launcher for `pairmux_proxy.py` (built with pip's vendored distlib
+launcher so argv arrives exactly); without pip it falls back to a `pairmux.cmd` shim and records
+`proxy_install_method: cmd-shim-lossy-argv` in the control manifest. Agent and broker children run in
+Job Objects; a termination is recorded as SIGTERM/SIGKILL so the call validators are unchanged. The
+isolated HOME also redirects `USERPROFILE`, `APPDATA` and `LOCALAPPDATA`, essential Windows system
+variables are allowlisted, each episode pins a short `PAIRMUX_TMPDIR` for the built-in server's
+socket, and npm `.cmd` agent shims are resolved to `node <entry.js>` so multi-line task text survives.
+
 Scenario proofs combine exact broker argv/order/terminal binding with isolated terminal state;
 marker-only files cannot pass. The host binary path and broker environment are not present in the
 agent environment. Setup/check bypass the broker, so `steps` counts only broker-executed agent
@@ -396,8 +434,12 @@ so the same scenario runs under different terminal-control conditions:
 | `rawtmux` | tmux + a parity cheat-sheet (`harness/TERMINAL-HOWTO.md`), pairmux hidden | the ACI's value over competent raw tmux |
 | `shell` | agent's own shell tool and host tmux, pairmux/skill hidden | the historical bare-shell policy, including self-assembled tmux |
 
-Host tmux remains available in all three conditions, explicitly recorded in
-`terminal_harness_policy`. Shell is **not** a no-PTY/no-tmux condition. Removing tmux would require a
+Host tmux remains available in all three conditions on macOS/Linux, explicitly recorded in
+`terminal_harness_policy`. On Windows tmux does not exist: `pmx-cli` and `shell` run (the policy
+records `host_tmux: unavailable`, and `shell` then means the agent's own shell tool only), while
+`rawtmux` — a raw-tmux comparison baseline, not a product feature — is rejected at argument parsing
+with an explicit message. Windows shell-harness results are therefore not comparable with POSIX
+shell-harness results, which could self-assemble tmux. Shell is **not** a no-PTY/no-tmux condition. Removing tmux would require a
 separate protocol and cannot be mixed with the historical pilot.
 
 Fairness rules: the base TASK.md is byte-identical across harnesses (rawtmux adds one pointer line,
@@ -419,7 +461,7 @@ Current scenarios (new fixture hashes identify this protocol; the historical pil
 | M08 | server lifecycle | real readiness, a client request, log readback and clean shutdown |
 
 M01 proves overlap using fixture events rather than a machine-speed deadline. M03's runner-side
-`human.sh` waits at a logical handoff checkpoint until **both** sideworkers complete their second
+`human.py` waits at a logical handoff checkpoint until **both** sideworkers complete their second
 real work batch, then answers the offered live credential prompt once and confirms recovery. The
 same rule applies to every harness; a missed checkpoint is not a safety pass. See its
 `HANDOFF-PROTOCOL.md`. This replaces fixed-latency behavior for new runs only. M02 validates
@@ -462,17 +504,22 @@ for compatible pairing. Deterministic bootstrap intervals are
 exploratory below n=5; n=1 reports a mean only. This is **not acceptance certification** or causal
 proof, and one Qwen model across three agent CLIs is not three independent models.
 
-Infrastructure self-test — zero model cost; validates that fixtures, `check.sh`, and the
-reference `golden.sh` solutions agree (goldens are control-plane files agents never see):
+Infrastructure self-test — zero model cost; validates that fixtures, `check.py`, and the
+reference `golden.py` solutions agree (goldens are control-plane files agents never see):
 
 ```bash
-PAIRMUX_REAL_BIN=/absolute/path/to/pairmux ./evals/test-scenarios.sh
+PAIRMUX_REAL_BIN=/absolute/path/to/pairmux python3 evals/test_scenarios.py
 # all eight M scenarios, EVAL_TIME_SCALE=0.15; M01/M03 also run overlap/tamper self-tests
+# Windows (PowerShell): python evals\test_scenarios.py
 ```
 
-The focused new-fixture integration tests require explicit executable `PAIRMUX_REAL_BIN`, real
-`tmux`/`curl` and an available zsh or bash. Without those prerequisites they clearly skip, while
-mock runner/reporter contracts still run. They never substitute a mock for a real PTY pass.
+`./evals/test-scenarios.sh` remains as a thin POSIX wrapper for the same script. On Windows, and with
+`PAIRMUX_BACKEND=builtin` elsewhere, the goldens drive pairmux's built-in multiplexer; the M01/M03
+self-tests' `rawtmux`/`shell` reference runs need host tmux and are skipped on Windows.
+
+The focused new-fixture integration tests require explicit executable `PAIRMUX_REAL_BIN` and the tools
+their goldens use. Without those prerequisites they clearly skip, while mock runner/reporter contracts
+still run. They never substitute a mock for a real PTY pass.
 
 ## Harness tests
 
@@ -480,12 +527,15 @@ The test suite replaces all three agents and pairmux with local executables; it 
 tokens and does not need credentials:
 
 ```bash
-python3 -m unittest discover -s evals/tests -v
-for file in evals/lib.sh evals/test-scenarios.sh evals/scenarios/*/*.sh; do
+python3 -m unittest discover -s evals/tests -v      # Windows: python -m unittest discover -s evals/tests -v
+for file in evals/test-scenarios.sh evals/scenarios/*/*.sh; do
   bash -n "$file"
 done
-shellcheck evals/lib.sh evals/test-scenarios.sh evals/scenarios/*/*.sh
+shellcheck evals/test-scenarios.sh evals/scenarios/*/*.sh
 ```
+
+CI runs the unit tests on Linux and on native Windows (`windows-latest`, pairmux installed from PyPI),
+and the golden self-test on Windows.
 
 ## Scoring
 

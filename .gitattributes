@@ -1,0 +1,3 @@
+# Keep LF in every checkout (Windows included): fixture hashes, generated files and the
+# POSIX shell fixtures must be byte-identical across platforms.
+* text=auto eol=lf

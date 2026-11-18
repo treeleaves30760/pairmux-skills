@@ -15,18 +15,49 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Compile Python sources
         run: |
-          for file in evals/*.py evals/tests/*.py evals/scenarios/*/*.py; do
+          for file in evals/*.py evals/tests/*.py evals/scenarios/*/*.py evals/scenarios/*/windows/*.py; do
             python3 -m py_compile "$file"
           done
       - name: Run model-free harness tests
         run: python3 -m unittest discover -s evals/tests -v
       - name: Validate scenario shell
         run: |
-          for file in evals/lib.sh evals/test-scenarios.sh evals/scenarios/*/*.sh; do
+          for file in evals/test-scenarios.sh evals/scenarios/*/*.sh; do
             bash -n "$file"
           done
       - name: Lint scenario shell
-        run: shellcheck evals/lib.sh evals/test-scenarios.sh evals/scenarios/*/*.sh
+        run: shellcheck evals/test-scenarios.sh evals/scenarios/*/*.sh
+
+  # Native Windows: no tmux, no WSL. pairmux runs on its built-in ConPTY multiplexer, the scenario
+  # control scripts are Python, and every fixture an agent runs has a Windows twin.
+  eval-harness-windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Install pairmux from PyPI
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          python -m pip install --disable-pip-version-check --upgrade pairmux
+          $scripts = python -c "import sysconfig; print(sysconfig.get_path('scripts'))"
+          $bin = Join-Path $scripts 'pairmux.exe'
+          & $bin version
+          "PAIRMUX_REAL_BIN=$bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Compile Python sources
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          Get-ChildItem -Path evals -Recurse -Filter *.py | ForEach-Object { python -m py_compile $_.FullName }
+      - name: Run model-free harness tests
+        run: python -m unittest discover -s evals/tests -v
+      - name: Golden scenario self-test (built-in multiplexer)
+        run: python evals/test_scenarios.py
 
   commit-policy:
     runs-on: ubuntu-latest

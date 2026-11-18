@@ -10,13 +10,17 @@ import sys
 import time
 
 ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+import termsupport  # noqa: E402
+
 TOKEN = secrets.token_hex(8)
 STOP = None
 
 
 def record(event, **fields):
-    row = dict(event=event, pid=os.getpid(), ppid=os.getppid(), sid=os.getsid(0),
-               tty=os.ttyname(0), cwd=os.getcwd(), time_ns=time.monotonic_ns(), **fields)
+    ppid, sid, tty = termsupport.identity(0)
+    row = dict(event=event, pid=os.getpid(), ppid=ppid, sid=sid,
+               tty=tty, cwd=os.getcwd(), time_ns=time.monotonic_ns(), **fields)
     with (ROOT / 'server-events.jsonl').open('a') as handle:
         handle.write(json.dumps(row) + '\n')
 

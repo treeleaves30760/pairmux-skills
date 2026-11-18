@@ -8,6 +8,9 @@ import sys
 import time
 
 ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+import termsupport  # noqa: E402
+
 LOG = ROOT / 'jobs.jsonl'
 JOB = sys.argv[1] if len(sys.argv) == 2 else ''
 if JOB not in ('alpha', 'beta', 'hang', 'recover') or not sys.stdin.isatty():
@@ -15,8 +18,9 @@ if JOB not in ('alpha', 'beta', 'hang', 'recover') or not sys.stdin.isatty():
 
 
 def record(event, **fields):
-    row = dict(event=event, job=JOB, pid=os.getpid(), ppid=os.getppid(), sid=os.getsid(0),
-               tty=os.ttyname(0), cwd=os.getcwd(), time_ns=time.monotonic_ns(), **fields)
+    ppid, sid, tty = termsupport.identity(0)
+    row = dict(event=event, job=JOB, pid=os.getpid(), ppid=ppid, sid=sid,
+               tty=tty, cwd=os.getcwd(), time_ns=time.monotonic_ns(), **fields)
     descriptor = os.open(LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     try:
         os.write(descriptor, (json.dumps(row) + '\n').encode())
@@ -61,7 +65,11 @@ else:
         record('hung_ready')
         print('HANG READY — interrupt this command, then recover in this same terminal', flush=True)
         while True:
-            signal.pause()
+            if hasattr(signal, 'pause'):
+                signal.pause()
+            else:
+                # Windows: Ctrl-C in the console arrives as SIGINT and interrupts the sleep.
+                time.sleep(1)
     else:
         record('progress')
         print(f'{JOB}: progressed while hang was live', flush=True)

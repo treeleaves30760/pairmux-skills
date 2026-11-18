@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -26,6 +28,48 @@ assert SPEC and SPEC.loader
 eval_run = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = eval_run
 SPEC.loader.exec_module(eval_run)
+# The fixture a scenario runs on this platform (x.sh, or its x.py twin on Windows).
+FX = eval_run.evallib.fixture_name
+WINDOWS = os.name == "nt"
+MOCK_PAIRMUX = "pairmux.exe" if WINDOWS else "pairmux"
+
+
+def install_mock_program(directory: Path, name: str) -> Path:
+    """mock_bin.py installed as the executable `name` (a real console launcher on Windows)."""
+    if WINDOWS:
+        path, _method = eval_run.winsupport.make_console_launcher(MOCK_BIN, directory, name)
+        return path
+    target = directory / name
+    shutil.copy2(MOCK_BIN, target)
+    target.chmod(0o755)
+    return target
+
+
+def install_proxy_and_real(runtime: Path, mock_dir: Path) -> tuple[Path, Path]:
+    """The runner's proxy front plus a mock `real-pairmux`, as run_episode lays them out."""
+    (runtime / "bin").mkdir(parents=True)
+    if WINDOWS:
+        proxy, _method = eval_run.winsupport.make_console_launcher(
+            EVALS_DIR / "pairmux_proxy.py", runtime / "bin", "pairmux"
+        )
+    else:
+        proxy = runtime / "bin" / "pairmux"
+        shutil.copy2(EVALS_DIR / "pairmux_proxy.py", proxy)
+        proxy.chmod(0o755)
+    real = install_mock_program(runtime, "real-pairmux") if WINDOWS else runtime / "real-pairmux"
+    if not WINDOWS:
+        shutil.copy2(mock_dir / "pairmux", real)
+        real.chmod(0o755)
+    return proxy, real
+
+
+def private_tmp(prefix: str) -> Path:
+    """Short private temp dir (/tmp keeps AF_UNIX paths short on POSIX)."""
+    return Path(tempfile.mkdtemp(prefix=prefix, dir=None if WINDOWS else "/tmp")).resolve()
+
+
+def broker_endpoint(runtime: Path) -> Path:
+    return runtime / ("broker.pipe" if WINDOWS else "broker.sock")
 
 
 class RunnerTests(unittest.TestCase):
@@ -35,9 +79,7 @@ class RunnerTests(unittest.TestCase):
         self.bin_dir = self.root / "bin"
         self.bin_dir.mkdir()
         for name in ("opencode", "claude", "codex", "pairmux"):
-            target = self.bin_dir / name
-            shutil.copy2(MOCK_BIN, target)
-            target.chmod(0o755)
+            install_mock_program(self.bin_dir, name)
         self.agent_log = self.root / "agent.jsonl"
         self.version_log = self.root / "version.jsonl"
         self.env = os.environ.copy()
@@ -55,7 +97,7 @@ class RunnerTests(unittest.TestCase):
     def invoke(self, *arguments: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         runner_arguments = list(arguments)
         if "--pairmux-bin" not in runner_arguments:
-            runner_arguments.extend(["--pairmux-bin", str(self.bin_dir / "pairmux")])
+            runner_arguments.extend(["--pairmux-bin", str(self.bin_dir / MOCK_PAIRMUX)])
         return subprocess.run(
             [sys.executable, str(RUNNER), *runner_arguments],
             cwd=EVALS_DIR.parent,
@@ -114,16 +156,80 @@ class RunnerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "mix suites"):
             eval_run.parse_scenarios(["S01-M03"], available)
 
+    def test_rawtmux_harness_is_rejected_on_windows_only(self) -> None:
+        with mock.patch.object(eval_run, "IS_WINDOWS", True):
+            policy = eval_run.terminal_harness_policy("shell")
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+                eval_run.main(["--agent", "opencode", "--terminal-harness", "rawtmux", "--dry-run"])
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("tmux does not run on Windows", stderr.getvalue())
+        self.assertEqual(policy["host_tmux"], "unavailable")
+        if not WINDOWS:
+            self.assertEqual(eval_run.terminal_harness_policy("shell")["host_tmux"], "available")
+
+    def test_npm_cmd_shims_resolve_to_node_for_exact_task_argv(self) -> None:
+        shim_dir = self.root / "npm"
+        (shim_dir / "node_modules/@openai/codex/bin").mkdir(parents=True)
+        entry = shim_dir / "node_modules/@openai/codex/bin/codex.js"
+        entry.write_text("// entry\n", encoding="utf-8")
+        node = shim_dir / "node.exe"
+        node.write_bytes(b"MZ")
+        shim = shim_dir / "codex.cmd"
+        shim.write_text(
+            "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\n"
+            "SETLOCAL\r\nCALL :find_dp0\r\n\r\nIF EXIST \"%dp0%\\node.exe\" (\r\n"
+            "  SET \"_prog=%dp0%\\node.exe\"\r\n) ELSE (\r\n  SET \"_prog=node\"\r\n)\r\n\r\n"
+            "endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & \"%_prog%\"  "
+            "\"%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js\" %*\r\n",
+            encoding="utf-8",
+        )
+        if WINDOWS:
+            self.assertEqual(
+                eval_run.winsupport.resolve_agent_executable(str(shim)),
+                [str(node.resolve()), str(entry.resolve())],
+            )
+        else:
+            # The shim's Windows-relative target is parsed even where "\\" is not a separator.
+            match = eval_run.winsupport._CMD_SHIM_TARGET.search(shim.read_text(encoding="utf-8"))
+            self.assertEqual(match.group(1), "node_modules\\@openai\\codex\\bin\\codex.js")
+        opaque = shim_dir / "other.cmd"
+        opaque.write_text("@echo off\r\nsomething.exe %*\r\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "not an npm cmd-shim"):
+            eval_run.winsupport.resolve_agent_executable(str(opaque))
+        self.assertEqual(eval_run.winsupport.posix_path(Path("C:/Users/x/AppData")) if not WINDOWS
+                         or not shutil.which("cygpath") else "/c/Users/x/AppData", "/c/Users/x/AppData")
+
+    def test_windows_worktree_drops_shell_fixtures_and_gains_overlay(self) -> None:
+        source = eval_run.SCENARIOS_DIR / "S02"
+        if not (source / eval_run.evallib.WINDOWS_OVERLAY).is_dir():
+            self.skipTest("S02 has no windows/ overlay in this checkout")
+        overlay = sorted(
+            path.name for path in (source / eval_run.evallib.WINDOWS_OVERLAY).iterdir()
+            if path.is_file() and path.name != "TASK.md"
+        )
+        with mock.patch.object(eval_run.evallib, "IS_WINDOWS", True), \
+                mock.patch.object(eval_run, "IS_WINDOWS", True):
+            windows = eval_run.copy_fixture_worktree("S02", self.root / "windows-work")
+            task = eval_run.evallib.task_path(source)
+        posix = eval_run.copy_fixture_worktree("S02", self.root / "posix-work") if not WINDOWS else None
+        names = sorted(path.name for path in windows.iterdir())
+        self.assertFalse([name for name in names if name.endswith(".sh")])
+        self.assertTrue(set(overlay) <= set(names))
+        self.assertNotIn("TASK.md", names)
+        self.assertNotIn(eval_run.evallib.WINDOWS_OVERLAY, names)
+        if (source / eval_run.evallib.WINDOWS_OVERLAY / "TASK.md").is_file():
+            self.assertEqual(task, source / eval_run.evallib.WINDOWS_OVERLAY / "TASK.md")
+        if posix is not None:
+            posix_names = sorted(path.name for path in posix.iterdir())
+            self.assertIn("slow-build.sh", posix_names)
+            self.assertNotIn(eval_run.evallib.WINDOWS_OVERLAY, posix_names)
+            self.assertFalse(set(overlay) & set(posix_names))
+
     def test_proxy_preserves_literal_argv_and_nonzero_exit(self) -> None:
-        runtime = Path(tempfile.mkdtemp(prefix="pmx-proxy-", dir="/tmp")).resolve()
+        runtime = private_tmp("pmx-proxy-")
         self.addCleanup(shutil.rmtree, runtime, True)
-        proxy = runtime / "bin" / "pairmux"
-        proxy.parent.mkdir(parents=True)
-        shutil.copy2(EVALS_DIR / "pairmux_proxy.py", proxy)
-        proxy.chmod(0o755)
-        real = runtime / "real-pairmux"
-        shutil.copy2(self.bin_dir / "pairmux", real)
-        real.chmod(0o755)
+        proxy, real = install_proxy_and_real(runtime, self.bin_dir)
         broker_env = self.env.copy()
         broker_env.pop("PAIRMUX_STATE_NAMESPACE", None)
         broker_env.update(
@@ -133,7 +239,7 @@ class RunnerTests(unittest.TestCase):
             }
         )
         broker = eval_run.PairmuxBroker(
-            runtime / "broker.sock",
+            broker_endpoint(runtime),
             real_pairmux=real,
             real_pairmux_sha256=eval_run.sha256_file(real),
             fixed_env=broker_env,
@@ -173,12 +279,16 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(record["exit_code"], 23)
         self.assertIsInstance(record["pid"], int)
         self.assertEqual(record["process_group"], record["pid"])
-        self.assertEqual(record["client_uid"], os.geteuid())
+        self.assertEqual(
+            record["client_uid"],
+            eval_run.winsupport.process_user_sid() if WINDOWS else os.geteuid(),
+        )
         self.assertEqual(record["pairmux_socket"], "proxy-test")
         self.assertEqual(record["pairmux_state_dir"], str(self.root / "proxy-state"))
         self.assertTrue(record["started_at"])
         self.assertTrue(record["finished_at"])
 
+    @unittest.skipIf(os.name == "nt", "POSIX login shells (bash/zsh) and their startup-file PATH rewrites")
     def test_shell_path_guard_survives_login_shell_path_rewrites(self) -> None:
         runtime = self.root / "guard-runtime"
         guard = eval_run.install_shell_path_guard(runtime, self.bin_dir)
@@ -194,7 +304,7 @@ class RunnerTests(unittest.TestCase):
             timeout=5,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertEqual(Path(completed.stdout.strip()).resolve(), (self.bin_dir / "pairmux").resolve())
+        self.assertEqual(Path(completed.stdout.strip()).resolve(), (self.bin_dir / MOCK_PAIRMUX).resolve())
         zsh = shutil.which("zsh")
         if zsh:
             completed = subprocess.run(
@@ -208,7 +318,7 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertEqual(
                 Path(completed.stdout.strip()).resolve(),
-                (self.bin_dir / "pairmux").resolve(),
+                (self.bin_dir / MOCK_PAIRMUX).resolve(),
             )
 
     def test_dry_run_has_no_side_effects_and_passes_task_as_argv(self) -> None:
@@ -284,11 +394,11 @@ class RunnerTests(unittest.TestCase):
         env.update(
             {
                 "PAIRMUX_EVAL_STATE_DIR": str(outside),
-                "PAIRMUX_REAL_BIN": str(self.bin_dir / "pairmux"),
+                "PAIRMUX_REAL_BIN": str(self.bin_dir / MOCK_PAIRMUX),
             }
         )
         completed = subprocess.run(
-            [str(scenario_dir / "setup.sh")],
+            [sys.executable, "-I", str(scenario_dir / "setup.py")],
             cwd=scenario_dir,
             env=env,
             text=True,
@@ -323,8 +433,8 @@ class RunnerTests(unittest.TestCase):
                 self.assertEqual(result["broker_policy_rejections"], 0)
                 self.assertEqual(result["agent_version"], f"{agent} mock-1.0")
                 self.assertEqual(result["model"], "default")
-                self.assertEqual(result["pairmux_path"], str((self.bin_dir / "pairmux").resolve()))
-                self.assertEqual(result["pairmux_sha256"], eval_run.sha256_file(self.bin_dir / "pairmux"))
+                self.assertEqual(result["pairmux_path"], str((self.bin_dir / MOCK_PAIRMUX).resolve()))
+                self.assertEqual(result["pairmux_sha256"], eval_run.sha256_file(self.bin_dir / MOCK_PAIRMUX))
                 self.assertTrue((run_root / "summary.json").is_file())
                 self.assertTrue((run_root / "summary.md").is_file())
                 skill_dir = run_root / result["skill_install_dir"]
@@ -587,8 +697,8 @@ class RunnerTests(unittest.TestCase):
         child = json.loads(
             (self.root / "provider-child.jsonl").read_text(encoding="utf-8").splitlines()[0]
         )
-        with self.assertRaises(ProcessLookupError):
-            os.kill(int(child["pid"]), 0)
+        # os.kill(pid, 0) would TerminateProcess on Windows; ask about liveness portably.
+        self.assertFalse(eval_run.evallib.pid_alive(int(child["pid"])))
 
     def test_provider_rate_limit_is_classified_when_agent_exits_immediately(self) -> None:
         env = self.env.copy()
@@ -996,7 +1106,7 @@ class RunnerTests(unittest.TestCase):
                     eval_run.PairmuxBroker._validate_socket_override(broker, argv)
 
     def test_s05_accepts_durable_retry_after_client_disconnect(self) -> None:
-        run_secret = {"argv": ["run", "secret", "./secret.sh"], "exit_code": 0}
+        run_secret = {"argv": ["run", "secret", FX("./secret.sh")], "exit_code": 0}
         disconnected = {
             "argv": ["wait", "secret", "--human", "--notify"],
             "cancel_reason": "client-disconnected",
@@ -1023,7 +1133,7 @@ class RunnerTests(unittest.TestCase):
         self.assertTrue(eval_run.calls_have_human_wait(calls, require_interrupted=True))
 
     def test_s05_proof_rejects_early_signal_wrong_terminal_missing_notify_and_short_timeout(self) -> None:
-        run_secret = {"argv": ["run", "secret", "./secret.sh"], "exit_code": 0}
+        run_secret = {"argv": ["run", "secret", FX("./secret.sh")], "exit_code": 0}
         counterexamples = [
             {
                 "argv": ["wait", "secret", "--human", "--notify"],
@@ -1069,7 +1179,7 @@ class RunnerTests(unittest.TestCase):
             "runner_timeout_client_live": True,
             "runner_timeout_client_ancestry_match": True,
         }
-        failed_prompt = {"argv": ["run", "secret", "./secret.sh"], "exit_code": 7}
+        failed_prompt = {"argv": ["run", "secret", FX("./secret.sh")], "exit_code": 7}
         self.assertIsNone(eval_run.s05_handoff_call([failed_prompt, interrupted_wait]))
 
     def test_process_ancestry_uses_live_os_parentage(self) -> None:
@@ -1092,22 +1202,22 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(eval_run.validate_scenario_calls("S06", repl_calls), [])
 
         server_calls = [
-            {"argv": ["new", "--name", "server", "--cmd", "./server.sh"], "exit_code": 0},
-            {"argv": ["new", "--name", "client", "--cmd", "./hit.sh"], "exit_code": 0},
+            {"argv": ["new", "--name", "server", "--cmd", FX("./server.sh")], "exit_code": 0},
+            {"argv": ["new", "--name", "client", "--cmd", FX("./hit.sh")], "exit_code": 0},
             {"argv": ["log", "server"], "exit_code": 0},
         ]
         self.assertEqual(eval_run.validate_scenario_calls("S08", server_calls), [])
 
         disconnected_server_calls = [
             {
-                "argv": ["run", "server", "./server.sh"],
+                "argv": ["run", "server", FX("./server.sh")],
                 "exit_code": -15,
                 "exit_signal": 15,
                 "received_signals": [15],
                 "cancel_reason": "client-disconnected",
                 "client_connected_at_finish": False,
             },
-            {"argv": ["run", "client", "./hit.sh"], "exit_code": 0},
+            {"argv": ["run", "client", FX("./hit.sh")], "exit_code": 0},
             {"argv": ["peek", "server"], "exit_code": 0},
         ]
         self.assertEqual(
@@ -1122,12 +1232,12 @@ class RunnerTests(unittest.TestCase):
         calls = [
             {"argv": ["new", "--name", "server"], "exit_code": 0},
             {
-                "argv": ["run", "server", "./server.sh", "--timeout", "5s"],
+                "argv": ["run", "server", FX("./server.sh"), "--timeout", "5s"],
                 "exit_code": 0,
             },
             {"argv": ["new", "--name", "client"], "exit_code": 0},
             {
-                "argv": ["run", "client", "./hit.sh", "--timeout", "10s"],
+                "argv": ["run", "client", FX("./hit.sh"), "--timeout", "10s"],
                 "exit_code": 0,
             },
             {"argv": ["log", "server", "--grep", "200"], "exit_code": 0},
@@ -1174,6 +1284,7 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("use `peek`/`log --grep`; never wait for a past line", skill)
         self.assertIn("one valid explicit timeout of at least 300s", skill)
 
+    @unittest.skipIf(os.name == "nt", "sources env.sh with a POSIX shell; Windows parses it as data only")
     def test_sourcing_generated_env_preserves_broker_proxy(self) -> None:
         env = self.env.copy()
         env["PAIRMUX_MOCK_MODE"] = "source_env"
@@ -1208,8 +1319,8 @@ class RunnerTests(unittest.TestCase):
                 {"argv": ["send", "py", "--text", "1234 * 5678", "--enter"], "exit_code": 0},
             ],
             "S08": [
-                {"argv": ["run", "same", "./server.sh"], "exit_code": 0},
-                {"argv": ["run", "same", "./hit.sh"], "exit_code": 0},
+                {"argv": ["run", "same", FX("./server.sh")], "exit_code": 0},
+                {"argv": ["run", "same", FX("./hit.sh")], "exit_code": 0},
                 {"argv": ["log", "same", "--grep", "GET"], "exit_code": 0},
             ],
             "S10": [{"argv": ["run", "x", "printf ZT-9QK > token.txt"], "exit_code": 0}],
@@ -1225,7 +1336,7 @@ class RunnerTests(unittest.TestCase):
                 {"argv": ["log", "log", "--grep", "FATAL|E4231"], "exit_code": 7},
             ],
             "S04": [
-                {"argv": ["run", "prompt", "./confirm.sh"], "exit_code": 0},
+                {"argv": ["run", "prompt", FX("./confirm.sh")], "exit_code": 0},
                 {"argv": ["send", "prompt", "--text", "yes", "--enter"], "exit_code": 7},
             ],
             "S06": [
@@ -1235,8 +1346,8 @@ class RunnerTests(unittest.TestCase):
             ],
             "S07": [{"argv": ["send", "report", "--text", "q"], "exit_code": 7}],
             "S08": [
-                {"argv": ["run", "server", "./server.sh"], "exit_code": 0},
-                {"argv": ["run", "client", "./hit.sh"], "exit_code": 0},
+                {"argv": ["run", "server", FX("./server.sh")], "exit_code": 0},
+                {"argv": ["run", "client", FX("./hit.sh")], "exit_code": 0},
                 {"argv": ["log", "server", "--grep", "GET|HTTP"], "exit_code": 7},
             ],
             "S09": [
@@ -1250,13 +1361,11 @@ class RunnerTests(unittest.TestCase):
                 self.assertTrue(eval_run.validate_scenario_calls(scenario, calls))
 
     def test_broker_rejects_client_reported_evidence_and_does_not_scan_agent_files(self) -> None:
-        runtime = Path(tempfile.mkdtemp(prefix="pmx-forge-", dir="/tmp")).resolve()
+        runtime = private_tmp("pmx-forge-")
         self.addCleanup(shutil.rmtree, runtime, True)
-        real = runtime / "real-pairmux"
-        shutil.copy2(self.bin_dir / "pairmux", real)
-        real.chmod(0o755)
+        _proxy, real = install_proxy_and_real(runtime, self.bin_dir)
         broker = eval_run.PairmuxBroker(
-            runtime / "broker.sock",
+            broker_endpoint(runtime),
             real_pairmux=real,
             real_pairmux_sha256=eval_run.sha256_file(real),
             fixed_env=self.env,
@@ -1274,11 +1383,23 @@ class RunnerTests(unittest.TestCase):
             }
         ).encode()
         try:
-            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-                client.connect(str(runtime / "broker.sock"))
-                client.sendall(struct.pack("!I", len(invalid)) + invalid)
-                client.shutdown(socket.SHUT_WR)
-                client.recv(4096)
+            if WINDOWS:
+                from multiprocessing.connection import Client
+
+                client = Client(broker.pipe_address, family="AF_PIPE")
+                try:
+                    client.send_bytes(invalid)
+                    client.recv_bytes()
+                except (EOFError, OSError):
+                    pass
+                finally:
+                    client.close()
+            else:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                    client.connect(str(runtime / "broker.sock"))
+                    client.sendall(struct.pack("!I", len(invalid)) + invalid)
+                    client.shutdown(socket.SHUT_WR)
+                    client.recv(4096)
         finally:
             trace = broker.stop_and_finalize()
         self.assertEqual(trace.calls, [])
@@ -1322,21 +1443,15 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("broker protocol error", " ".join(result["trace_validation_errors"]))
 
     def test_broker_audits_out_of_root_cwd_and_allows_recovery(self) -> None:
-        runtime = Path(tempfile.mkdtemp(prefix="pmx-policy-", dir="/tmp")).resolve()
+        runtime = private_tmp("pmx-policy-")
         self.addCleanup(shutil.rmtree, runtime, True)
-        proxy = runtime / "bin" / "pairmux"
-        proxy.parent.mkdir(parents=True)
-        shutil.copy2(EVALS_DIR / "pairmux_proxy.py", proxy)
-        proxy.chmod(0o755)
-        real = runtime / "real-pairmux"
-        shutil.copy2(self.bin_dir / "pairmux", real)
-        real.chmod(0o755)
+        proxy, real = install_proxy_and_real(runtime, self.bin_dir)
         allowed = self.root / "allowed"
         outside = self.root / "outside"
         allowed.mkdir()
         outside.mkdir()
         broker = eval_run.PairmuxBroker(
-            runtime / "broker.sock",
+            broker_endpoint(runtime),
             real_pairmux=real,
             real_pairmux_sha256=eval_run.sha256_file(real),
             fixed_env=self.env,
@@ -1380,21 +1495,15 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(rejection["argv"], ["mock-fail"])
 
     def test_broker_keeps_socket_override_fatal_for_out_of_root_cwd(self) -> None:
-        runtime = Path(tempfile.mkdtemp(prefix="pmx-policy-order-", dir="/tmp")).resolve()
+        runtime = private_tmp("pmx-policy-order-")
         self.addCleanup(shutil.rmtree, runtime, True)
-        proxy = runtime / "bin" / "pairmux"
-        proxy.parent.mkdir(parents=True)
-        shutil.copy2(EVALS_DIR / "pairmux_proxy.py", proxy)
-        proxy.chmod(0o755)
-        real = runtime / "real-pairmux"
-        shutil.copy2(self.bin_dir / "pairmux", real)
-        real.chmod(0o755)
+        proxy, real = install_proxy_and_real(runtime, self.bin_dir)
         allowed = self.root / "fatal-allowed"
         outside = self.root / "fatal-outside"
         allowed.mkdir()
         outside.mkdir()
         broker = eval_run.PairmuxBroker(
-            runtime / "broker.sock",
+            broker_endpoint(runtime),
             real_pairmux=real,
             real_pairmux_sha256=eval_run.sha256_file(real),
             fixed_env=self.env,
@@ -1503,7 +1612,7 @@ class RunnerTests(unittest.TestCase):
         self.assertIsNone(invocation["host_poison"])
         self.assertIsNone(invocation["real_bin_exposed"])
         work = run_root / result["paths"]["episode"] / "work/S01"
-        for name in ("setup.sh", "check.sh", "env.sh", "lib.sh"):
+        for name in ("setup.py", "check.py", "env.sh", "evallib.py", "TASK.md"):
             self.assertFalse((work / name).exists(), name)
         manifest = json.loads(
             (run_root / result["paths"]["control_manifest"]).read_text(encoding="utf-8")
@@ -1523,11 +1632,15 @@ class RunnerTests(unittest.TestCase):
         )
 
     def test_s10_accepts_exact_token_with_optional_single_newline(self) -> None:
+        windows = os.name == "nt"
         cases = (
             (b"ZT-9QK", 0),
             (b"ZT-9QK\n", 0),
             (b"ZT-9QK\n\n", 1),
-            (b"ZT-9QK\r\n", 1),
+            # Windows-native writers (PowerShell, cmd) end lines with CRLF and may add a BOM or
+            # write UTF-16; only there are those spellings of the same token accepted.
+            (b"ZT-9QK\r\n", 0 if windows else 1),
+            (b"\xef\xbb\xbfZT-9QK\r\n", 0 if windows else 1),
             (b"ZT-9QK ", 1),
         )
         for index, (content, expected) in enumerate(cases):
@@ -1564,7 +1677,7 @@ class RunnerTests(unittest.TestCase):
                     }
                 )
                 completed = subprocess.run(
-                    [str(scenario_dir / "check.sh")],
+                    [sys.executable, "-I", str(scenario_dir / "check.py")],
                     cwd=scenario_dir,
                     env=env,
                     stdout=subprocess.PIPE,
@@ -1614,7 +1727,7 @@ class RunnerTests(unittest.TestCase):
             'Request: "GET / HTTP/1.1" 200 -\n', encoding="utf-8"
         )
         reported = subprocess.run(
-            [str(scenario_dir / "check.sh"), str(transcript)],
+            [sys.executable, "-I", str(scenario_dir / "check.py"), str(transcript)],
             cwd=scenario_dir,
             env=env,
             stdout=subprocess.PIPE,
@@ -1626,7 +1739,7 @@ class RunnerTests(unittest.TestCase):
 
         transcript.write_text("The status was 200.\n", encoding="utf-8")
         omitted = subprocess.run(
-            [str(scenario_dir / "check.sh"), str(transcript)],
+            [sys.executable, "-I", str(scenario_dir / "check.py"), str(transcript)],
             cwd=scenario_dir,
             env=env,
             stdout=subprocess.PIPE,
@@ -1737,7 +1850,7 @@ class RunnerTests(unittest.TestCase):
         run_root, result = self.result_for(completed)
         invocation = json.loads(self.agent_log.read_text(encoding="utf-8").splitlines()[0])
         self.assertEqual(invocation["opencode_auth_providers"], ["opencode"])
-        self.assertEqual(invocation["opencode_auth_mode"], "0o600")
+        self.assertEqual(invocation["opencode_auth_mode"], "0o666" if WINDOWS else "0o600")
         self.assertFalse(invocation["opencode_auth_content_present"])
         self.assertFalse(invocation["opencode_api_key_present"])
         self.assertFalse(Path(invocation["opencode_auth_path"]).exists())
@@ -1852,7 +1965,7 @@ class RunnerTests(unittest.TestCase):
             "--timeout",
             "5",
             "--pairmux-bin",
-            str(self.bin_dir / "pairmux"),
+            str(self.bin_dir / MOCK_PAIRMUX),
         ]
 
         first_output = self.root / "runner-exception-runs"
@@ -1860,7 +1973,7 @@ class RunnerTests(unittest.TestCase):
             mock.patch.dict(os.environ, self.env, clear=True),
             mock.patch.object(
                 eval_run,
-                "cleanup_tmux",
+                "cleanup_endpoint",
                 side_effect=RuntimeError("simulated runner cleanup failure"),
             ),
             mock.patch("builtins.print"),
@@ -1897,7 +2010,7 @@ class RunnerTests(unittest.TestCase):
             mock.patch.dict(os.environ, self.env, clear=True),
             mock.patch.object(
                 eval_run,
-                "cleanup_tmux",
+                "cleanup_endpoint",
                 side_effect=RuntimeError("simulated runner cleanup failure"),
             ),
             mock.patch.object(
@@ -1989,7 +2102,7 @@ class RunnerTests(unittest.TestCase):
                     "--timeout",
                     "5",
                     "--pairmux-bin",
-                    str(self.bin_dir / "pairmux"),
+                    str(self.bin_dir / MOCK_PAIRMUX),
                     "--output-dir",
                     str(output_dir),
                 ]
@@ -2079,7 +2192,7 @@ class RunnerTests(unittest.TestCase):
         invocation = json.loads(self.agent_log.read_text(encoding="utf-8").splitlines()[0])
         self.assertFalse(invocation["hf_token_present"])
         self.assertEqual(invocation["opencode_auth_providers"], ["huggingface"])
-        self.assertEqual(invocation["opencode_auth_mode"], "0o600")
+        self.assertEqual(invocation["opencode_auth_mode"], "0o666" if WINDOWS else "0o600")
         self.assertFalse(Path(invocation["opencode_auth_path"]).exists())
         self.assertEqual(result["provider"], "huggingface")
         self.assertTrue(result["provider_verified"])
@@ -2145,7 +2258,7 @@ class RunnerTests(unittest.TestCase):
         run_root, result = self.result_for(completed)
         invocation = json.loads(self.agent_log.read_text(encoding="utf-8").splitlines()[0])
         self.assertEqual(invocation["opencode_auth_providers"], ["huggingface"])
-        self.assertEqual(invocation["opencode_auth_mode"], "0o600")
+        self.assertEqual(invocation["opencode_auth_mode"], "0o666" if WINDOWS else "0o600")
         self.assertFalse(invocation["hf_token_present"])
         self.assertFalse(Path(invocation["opencode_auth_path"]).exists())
         self.assertEqual(result["provider"], "huggingface")
@@ -2167,6 +2280,7 @@ class RunnerTests(unittest.TestCase):
             self.assertNotIn(value, completed.stdout)
             self.assertNotIn(value, completed.stderr)
 
+    @unittest.skipIf(os.name == "nt", "POSIX mode bits and FIFOs; Windows protects the auth file with ACLs")
     def test_opencode_auth_cli_and_source_validation_fail_closed(self) -> None:
         valid = self.root / "valid-auth.json"
         valid.write_text(
@@ -2402,38 +2516,47 @@ class RunnerTests(unittest.TestCase):
         self.assertFalse(rejected["eligible"])
         self.assertIn("S01 pass rate", " ".join(rejected["reasons"]))
 
-    def test_check_helpers_find_custom_socket_hashed_state(self) -> None:
-        state = self.root / "state"
-        socket_name = "isolated-test-socket"
-        tmux_root = self.root / "tmux-root"
-        tmux_root.mkdir()
-        identity = os.path.join(str(tmux_root.resolve()), f"tmux-{os.getuid()}", socket_name)
-        digest = hashlib.sha256(identity.encode()).hexdigest()
-        terminal = state / ".sockets" / digest / "worker"
-        terminal.mkdir(parents=True)
-        (terminal / "raw.log").write_text("HASHED-MARKER\n", encoding="utf-8")
-        env = self.env.copy()
-        env.pop("PAIRMUX_STATE_NAMESPACE", None)
-        env.update(
-            {
-                "PAIRMUX_STATE_DIR": str(state),
-                "PAIRMUX_SOCKET": socket_name,
-                "TMUX_TMPDIR": str(tmux_root),
-            }
+    def evallib_probe(self, expression: str, *arguments: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+        """Evaluate one evallib expression in an isolated interpreter, as check.py would."""
+        code = (
+            "import sys; sys.path.insert(0, sys.argv[1]); import evallib; "
+            f"result = {expression}; "
+            "print(result) if isinstance(result, str) else sys.exit(0 if result else 1)"
         )
-        completed = subprocess.run(
-            [
-                "bash",
-                "-c",
-                '. "$1"; pmx_journal_has worker HASHED-MARKER',
-                "bash",
-                str(EVALS_DIR / "lib.sh"),
-            ],
+        return subprocess.run(
+            [sys.executable, "-I", "-c", code, str(EVALS_DIR), *arguments],
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            timeout=5,
+            encoding="utf-8",
+            timeout=10,
+        )
+
+    def test_check_helpers_find_custom_socket_hashed_state(self) -> None:
+        state = self.root / "state"
+        socket_name = "isolated-test-socket"
+        runtime_root = self.root / "endpoint-root"
+        runtime_root.mkdir()
+        env = self.env.copy()
+        env.pop("PAIRMUX_STATE_NAMESPACE", None)
+        env.update({"PAIRMUX_STATE_DIR": str(state), "PAIRMUX_SOCKET": socket_name})
+        # An independent replica of pairmux's endpoint identity (internal/state, internal/rundir).
+        if os.name == "nt":
+            identity = "builtin:" + os.path.join(os.path.realpath(runtime_root), "run", socket_name)
+            env["PAIRMUX_TMPDIR"] = str(runtime_root)
+        else:
+            identity = os.path.join(str(runtime_root.resolve()), f"tmux-{os.getuid()}", socket_name)
+            env.update({"TMUX_TMPDIR": str(runtime_root), "PAIRMUX_BACKEND": "tmux"})
+        digest = hashlib.sha256(identity.encode()).hexdigest()
+        terminal = state / ".sockets" / digest / "worker"
+        terminal.mkdir(parents=True)
+        (terminal / "raw.log").write_text("HASHED-MARKER\n", encoding="utf-8")
+        # A decoy namespace: the computed one must win, not a lone-namespace fallback.
+        decoy = state / ".sockets" / ("0" * 64) / "worker"
+        decoy.mkdir(parents=True)
+        completed = self.evallib_probe(
+            "evallib.journal_has('worker', 'HASHED-MARKER')", env=env
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
 
@@ -2463,21 +2586,7 @@ class RunnerTests(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
-        completed = subprocess.run(
-            [
-                "bash",
-                "-c",
-                '. "$1"; pmx_issued_content "$2"',
-                "bash",
-                str(EVALS_DIR / "lib.sh"),
-                str(transcript),
-            ],
-            env=self.env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=5,
-        )
+        completed = self.evallib_probe("evallib.issued_content(sys.argv[2])", str(transcript), env=self.env)
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("pairmux wait secret --human --notify", completed.stdout)
         self.assertIn("handoff requested", completed.stdout)

@@ -5,16 +5,17 @@ import json
 import os
 from pathlib import Path
 import sys
-import termios
 import time
-import tty
 
 ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+import termsupport  # noqa: E402
 
 
 def record(event, **fields):
-    row = dict(event=event, pid=os.getpid(), ppid=os.getppid(), sid=os.getsid(0),
-               tty=os.ttyname(0), cwd=os.getcwd(), time_ns=time.monotonic_ns(), **fields)
+    ppid, sid, tty = termsupport.identity(0)
+    row = dict(event=event, pid=os.getpid(), ppid=ppid, sid=sid,
+               tty=tty, cwd=os.getcwd(), time_ns=time.monotonic_ns(), **fields)
     with (ROOT / "interaction.jsonl").open("a") as handle:
         handle.write(json.dumps(row) + "\n")
 
@@ -65,16 +66,12 @@ def deploy(value):
     for number in range(1, 81):
         print(f"release {value}: review line {number:02d}")
     print("(END) — press q to leave the deployment report", flush=True)
-    settings = termios.tcgetattr(0)
-    try:
-        tty.setcbreak(0)
+    with termsupport.KeyReader() as keys:
         while True:
-            key = os.read(0, 1).decode("utf-8", errors="replace")
+            key = keys.read()
             record("pager_key", key=key)
             if key == "q":
                 break
-    finally:
-        termios.tcsetattr(0, termios.TCSADRAIN, settings)
     record("pager_exit", value=value)
     line = f"DEPLOYED release={value}"
     (ROOT / "deployment.txt").write_text(line + "\n")

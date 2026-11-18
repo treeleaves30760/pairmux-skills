@@ -7,12 +7,16 @@ import sys
 import time
 
 ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+import termsupport  # noqa: E402
+
 LOG = ROOT / 'queue.jsonl'
 
 
 def record(event, **fields):
-    row = dict(event=event, pid=os.getpid(), ppid=os.getppid(), sid=os.getsid(0),
-               tty=os.ttyname(0), cwd=os.getcwd(), time_ns=time.monotonic_ns(), **fields)
+    ppid, sid, tty = termsupport.identity(0)
+    row = dict(event=event, pid=os.getpid(), ppid=ppid, sid=sid,
+               tty=tty, cwd=os.getcwd(), time_ns=time.monotonic_ns(), **fields)
     with LOG.open('a') as handle:
         handle.write(json.dumps(row) + '\n')
     return row

@@ -10,6 +10,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The Windows statements below describe the pairmux CLI that follows 1.4.0 (native Windows TUI,
 `update` and console-mode prompt detection); all other guidance is unchanged for CLI >=1.0.0.
 
+### Added
+
+- The eval scenarios run natively on Windows 10 1809+ (pairmux's built-in ConPTY multiplexer,
+  PowerShell terminals), without tmux, bash or WSL. Scenarios whose fixtures are POSIX shell scripts
+  carry a `windows/` overlay of Python twins and a PowerShell-worded `windows/TASK.md`; fixtures that
+  record their live terminal use the new `evals/termsupport.py` (console identity on Windows, the
+  unchanged `ppid`/`sid`/`/dev/tty…` facts on POSIX).
+- `evals/test_scenarios.py`: the cross-platform golden self-test (`evals/test-scenarios.sh` is now a
+  thin POSIX wrapper for it).
+- A `windows-latest` CI job that installs pairmux from PyPI and runs the model-free tests and the
+  golden self-test.
+
 ### Changed
 
 - Windows no longer "refuses `update`" or "relies on wording only". `pairmux update` works on a
@@ -21,6 +33,14 @@ The Windows statements below describe the pairmux CLI that follows 1.4.0 (native
   input; otherwise `E_BAD_ARGS`) instead of "not on Windows yet".
 - The environment list gains `PAIRMUX_CONSOLE_PROBE=0`, which turns the Windows console-mode
   helper off.
+- Scenario control scripts are Python (`setup.py`, `check.py`, `golden.py`, `human.py`) sharing
+  `evals/evallib.py`, replacing `lib.sh` and the `*.sh` control scripts; run them as `python3 -I
+  setup.py` (`python -I` on Windows). `env.sh` is now data-only `export` lines that the checker parses
+  instead of sourcing. macOS/Linux task text, fixtures and scoring are unchanged.
+- `run.py` supports native Windows for the `pmx-cli` and `shell` harnesses; the `rawtmux` harness
+  (a raw-tmux comparison baseline) is rejected on Windows with a clear message because tmux does not
+  run there.
+- Root and eval READMEs list per-platform fixture prerequisites instead of requiring WSL on Windows.
 
 ## [0.5.0] - 2026-11-18
 

@@ -1,27 +1,39 @@
 #!/usr/bin/env python3
-"""Zero-cost M02/M04/M05/M06/M08 fixture tests; only owned tmux endpoints."""
+"""Zero-cost M02/M04/M05/M06/M08 fixture tests; only owned pairmux endpoints.
+
+The control scripts are the cross-platform Python ones (setup.py/check.py/golden.py/human.py),
+run with this interpreter in isolated mode exactly as the runner does. On macOS/Linux they use
+whichever backend pairmux picks (tmux when installed, or PAIRMUX_BACKEND=builtin); on Windows the
+built-in ConPTY backend. Golden mutations that splice POSIX shell syntax are POSIX-only.
+"""
 import json
 import os
 from pathlib import Path
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import unittest
 import uuid
 
 EVALS = Path(__file__).resolve().parents[1]
-SCENARIOS = ("M02", "M04", "M05", "M06", "M08")
-PRIVATE = {"TASK.md", "setup.sh", "check.sh", "env.sh", "golden.sh", "human.sh"}
-TEST_SHELL = shutil.which('zsh') or shutil.which('bash')
+sys.path.insert(0, str(EVALS))
+import evallib  # noqa: E402
+
+HAVE_CURL = bool(shutil.which('curl'))
+SCENARIOS = ("M02", "M04", "M05", "M06") + (("M08",) if HAVE_CURL else ())
+PRIVATE = {"TASK.md", "setup.py", "check.py", "env.sh", "golden.py", "human.py"}
+SHARED = ("evallib.py", "termsupport.py")
+TEST_SHELL = None if evallib.IS_WINDOWS else (shutil.which('zsh') or shutil.which('bash'))
 REAL_BIN = os.environ.get('PAIRMUX_REAL_BIN', '')
-LIVE_TOOLS = (os.name == 'posix' and TEST_SHELL and shutil.which('tmux') and shutil.which('curl')
-              and bool(REAL_BIN) and os.access(REAL_BIN, os.X_OK))
+LIVE_TOOLS = (evallib.is_executable(REAL_BIN) and (evallib.IS_WINDOWS or bool(TEST_SHELL)))
+POSIX_ONLY = unittest.skipIf(evallib.IS_WINDOWS, 'splices POSIX shell syntax into the golden')
 
 
 class Fixture:
     def __init__(self, scenario):
-        self.tmp = tempfile.TemporaryDirectory(prefix="pmx-new-m-", dir="/tmp")
+        self.tmp = tempfile.TemporaryDirectory(prefix="pmx-new-m-")
         try:
             self.initialize(scenario)
         except BaseException:
@@ -36,8 +48,13 @@ class Fixture:
         self.state = self.control / "runtime" / "state"
         self.work.mkdir(parents=True)
         self.scripts.mkdir(parents=True)
-        shutil.copy2(EVALS / "lib.sh", self.control / "evals" / "lib.sh")
+        for name in SHARED:
+            shutil.copy2(EVALS / name, self.control / "evals" / name)
         for path in (EVALS / "scenarios" / scenario).iterdir():
+            if path.is_dir() and path.name == evallib.WINDOWS_OVERLAY:
+                # The overlay is a control-side source; setup materializes it on Windows.
+                shutil.copytree(path, self.scripts / path.name)
+                continue
             if not path.is_file():
                 continue
             destination = self.scripts if path.name in PRIVATE else self.work
@@ -46,7 +63,7 @@ class Fixture:
         binary = REAL_BIN
         home = root / 'home'
         home.mkdir()
-        self.env = dict(os.environ, HOME=str(home), SHELL=TEST_SHELL,
+        self.env = dict(os.environ, HOME=str(home),
                         PAIRMUX_REAL_BIN=binary, PAIRMUX_BIN=binary,
                         PAIRMUX_EVAL_SOCKET=self.socket,
                         PAIRMUX_EVAL_SCENARIO_DIR=str(self.work),
@@ -55,15 +72,22 @@ class Fixture:
                         PAIRMUX_EVAL_ENV_FILE=str(self.control / "runtime" / "env.sh"),
                         PAIRMUX_EVAL_SUBGOALS_FILE=str(root / "subgoals.json"),
                         EVAL_TIME_SCALE="0.15")
+        if TEST_SHELL:
+            self.env['SHELL'] = TEST_SHELL
 
     def run(self, name, *, success=True, timeout=75, args=()):
-        process = subprocess.Popen([str(self.scripts / name), *args], cwd=self.work,
+        kwargs = ({'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP} if evallib.IS_WINDOWS
+                  else {'start_new_session': True})
+        process = subprocess.Popen(evallib.python_argv(self.scripts / name, *args), cwd=self.work,
                                    env=self.env, stdout=subprocess.PIPE,
-                                   stderr=subprocess.STDOUT, start_new_session=True)
+                                   stderr=subprocess.STDOUT, **kwargs)
         try:
             output, _ = process.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
+            if evallib.IS_WINDOWS:
+                process.kill()
+            else:
+                os.killpg(process.pid, signal.SIGKILL)
             output, _ = process.communicate()
             raise AssertionError(f"{name} timed out\n{output.decode(errors='replace')}")
         text = output.decode(errors="replace")
@@ -75,31 +99,35 @@ class Fixture:
         return json.loads(Path(self.env["PAIRMUX_EVAL_SUBGOALS_FILE"]).read_text())["subgoals"]
 
     def close(self):
-        # The only server we ever kill is this fixture's randomly named endpoint.
-        subprocess.run(["tmux", "-L", self.socket, "kill-server"], env=self.env,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        # The only endpoint we ever stop is this fixture's randomly named one.
+        exports, _ = evallib.parse_env_file(self.env["PAIRMUX_EVAL_ENV_FILE"])
+        env = dict(self.env, **exports)
+        evallib.stop_endpoint(self.socket, env, evallib.effective_backend(env))
         pid_file = self.state / "m06-human" / "human.pid"
         if pid_file.exists():
             try:
-                os.kill(int(pid_file.read_text()), signal.SIGTERM)
-            except (ValueError, ProcessLookupError):
+                evallib.terminate_pid(int(pid_file.read_text()))
+            except ValueError:
                 pass
-        self.tmp.cleanup()
+        try:
+            self.tmp.cleanup()
+        except OSError:
+            evallib.remove_tree(self.tmp.name)
 
 
-@unittest.skipUnless(LIVE_TOOLS, 'set PAIRMUX_REAL_BIN to a trusted real CLI; tmux, curl and zsh/bash are required')
+@unittest.skipUnless(LIVE_TOOLS, 'set PAIRMUX_REAL_BIN to a trusted real CLI (POSIX also needs zsh or bash)')
 class NewMScenarios(unittest.TestCase):
     def fixture(self, scenario):
         fixture = Fixture(scenario)
         self.addCleanup(fixture.close)
-        fixture.run("setup.sh")
+        fixture.run("setup.py")
         self.assertFalse(any((fixture.work / name).exists() for name in PRIVATE))
         return fixture
 
     def golden(self, scenario):
         fixture = self.fixture(scenario)
-        fixture.run("golden.sh")
-        fixture.run("check.sh")
+        fixture.run("golden.py")
+        fixture.run("check.py")
         entries = fixture.ledger()
         self.assertEqual(len(entries), 5)
         self.assertTrue(all(entry["pass"] for entry in entries))
@@ -108,7 +136,7 @@ class NewMScenarios(unittest.TestCase):
         return fixture
 
     def reject(self, fixture, *ids):
-        code, output = fixture.run("check.sh", success=False)
+        code, output = fixture.run("check.py", success=False)
         self.assertNotEqual(code, 0, output)
         failed = {entry["id"] for entry in fixture.ledger() if not entry["pass"]}
         self.assertTrue(set(ids) <= failed, (ids, failed, output))
@@ -120,6 +148,12 @@ class NewMScenarios(unittest.TestCase):
         update(records)
         path.write_text("".join(json.dumps(record) + "\n" for record in records))
         return lambda: path.write_bytes(original)
+
+    def splice_golden(self, fixture, old, new):
+        golden = fixture.scripts / 'golden.py'
+        source = golden.read_text()
+        self.assertIn(old, source)
+        golden.write_text(source.replace(old, new))
 
     def test_untouched_and_handwritten_outputs_fail(self):
         for scenario in SCENARIOS:
@@ -138,9 +172,11 @@ class NewMScenarios(unittest.TestCase):
                     'M05': ('job.py', 'hang'), 'M06': ('queue.py', 'checkpoint'),
                     'M08': ('server.py',)}
         for scenario, command in commands.items():
+            if scenario not in SCENARIOS:
+                continue
             with self.subTest(scenario=scenario):
                 fixture = self.fixture(scenario)
-                process = subprocess.run(['python3', '-I', *command], cwd=fixture.work,
+                process = subprocess.run([sys.executable, '-I', *command], cwd=fixture.work,
                                          env=fixture.env, input=b'1234 * 5678\nY\nq\n',
                                          capture_output=True, timeout=10)
                 self.assertNotEqual(process.returncode, 0)
@@ -149,10 +185,9 @@ class NewMScenarios(unittest.TestCase):
     def test_m02_golden_and_confirmation_pager_evidence(self):
         fixture = self.fixture("M02")
         # The live REPL may display by print() or its normal displayhook.
-        golden = fixture.scripts / 'golden.sh'
-        golden.write_text(golden.read_text().replace("--text '1234 * 5678'", "--text 'print(1234 * 5678)'"))
-        fixture.run('golden.sh')
-        fixture.run('check.sh')
+        self.splice_golden(fixture, "EXPRESSION = '1234 * 5678'", "EXPRESSION = 'print(1234 * 5678)'")
+        fixture.run('golden.py')
+        fixture.run('check.py')
         restore = self.mutate_events(fixture, "interaction.jsonl",
                                     lambda rows: rows.append(next(dict(row) for row in rows
                                                                   if row["event"] == "confirmation")))
@@ -181,45 +216,41 @@ class NewMScenarios(unittest.TestCase):
                            'left=1234\nright=5678\nproduct=left*right\nprint(product)'):
             with self.subTest(expression=expression):
                 fixture = self.fixture('M02')
-                golden = fixture.scripts / 'golden.sh'
-                golden.write_text(golden.read_text().replace("--text '1234 * 5678'", f"--text '{expression}'"))
-                fixture.run('golden.sh')
-                fixture.run('check.sh')
+                self.splice_golden(fixture, "EXPRESSION = '1234 * 5678'", f"EXPRESSION = {expression!r}")
+                fixture.run('golden.py')
+                fixture.run('check.py')
                 self.assertTrue(all(entry['pass'] for entry in fixture.ledger()))
 
     def test_m02_live_canned_result_is_rejected(self):
         for expression in ('7006652', 'unused=1234*5678; print(7006652)'):
             with self.subTest(expression=expression):
                 fixture = self.fixture('M02')
-                golden = fixture.scripts / 'golden.sh'
-                golden.write_text(golden.read_text().replace("--text '1234 * 5678'", f"--text '{expression}'"))
-                fixture.run('golden.sh')
+                self.splice_golden(fixture, "EXPRESSION = '1234 * 5678'", f"EXPRESSION = {expression!r}")
+                fixture.run('golden.py')
                 self.reject(fixture, 'repl_live_result', 'value_propagated', 'deployment_complete')
 
+    @POSIX_ONLY
     def test_m04_repeated_setup_is_rejected(self):
         for setup in ('source ../venv/bin/activate; export TOKEN=fixture-only-m04; ',
                       'source ../venv/bin/activate; ', 'export TOKEN=fixture-only-m04; '):
             with self.subTest(setup=setup):
                 fixture = self.fixture('M04')
-                golden = fixture.scripts / 'golden.sh'
-                source = golden.read_text()
                 for step in ('A2', 'A3'):
-                    source = source.replace(f"'python ../identity.py {step}'", f"'{setup}python ../identity.py {step}'")
-                golden.write_text(source)
-                fixture.run('golden.sh')
+                    self.splice_golden(fixture, f"'python ../identity.py {step}'",
+                                       f"'{setup}python ../identity.py {step}'")
+                fixture.run('golden.py')
                 self.reject(fixture, 'state_persisted', 'commands_completed')
 
+    @POSIX_ONLY
     def test_m04_observer_portable_exports_and_once_only(self):
         shells = [path for path in (shutil.which('bash'), shutil.which('zsh')) if path]
         for shell in shells:
             with self.subTest(shell=shell):
                 fixture = self.fixture('M04')
                 fixture.env['SHELL'] = shell
-                golden = fixture.scripts / 'golden.sh'
-                source = golden.read_text().replace("pmx run m04a 'python ../identity.py A2'",
-                    "pmx run m04a 'export UNRELATED=still-ok; export PATH=\"$PATH\"; export UNRELATED; "
-                    "test \"$UNRELATED\" = still-ok && python ../identity.py A2'")
-                golden.write_text(source)
+                self.splice_golden(fixture, "'A2': 'python ../identity.py A2'", "'A2': " + repr(
+                    'export UNRELATED=still-ok; export PATH="$PATH"; export UNRELATED; '
+                    'test "$UNRELATED" = still-ok && python ../identity.py A2'))
                 activation = fixture.work / 'venv' / 'bin' / 'activate'
                 subprocess.run([shell, '-n', str(activation)], check=True, capture_output=True)
                 if shutil.which('shellcheck'):
@@ -227,18 +258,17 @@ class NewMScenarios(unittest.TestCase):
                     # lint everything else, including our appended source stanza.
                     subprocess.run(['shellcheck', '-s', 'bash', '-x', '-e', 'SC2140', str(activation)],
                                    check=True, capture_output=True)
-                fixture.run('golden.sh')
-                fixture.run('check.sh')
+                fixture.run('golden.py')
+                fixture.run('check.py')
                 self.assertEqual([row['event'] for row in map(json.loads,
                     (fixture.work / 'environment.jsonl').read_text().splitlines())], ['activation', 'token_export'])
             for repeated in ('source ../venv/bin/activate; ', 'export TOKEN=fixture-only-m04; '):
                 with self.subTest(shell=shell, repeated=repeated):
                     fixture = self.fixture('M04')
                     fixture.env['SHELL'] = shell
-                    golden = fixture.scripts / 'golden.sh'
-                    source = golden.read_text().replace("'python ../identity.py A2'", f"'{repeated}python ../identity.py A2'")
-                    golden.write_text(source)
-                    fixture.run('golden.sh')
+                    self.splice_golden(fixture, "'python ../identity.py A2'",
+                                       f"'{repeated}python ../identity.py A2'")
+                    fixture.run('golden.py')
                     self.reject(fixture, 'state_persisted', 'commands_completed')
 
     def test_m04_golden_and_real_identity(self):
@@ -258,7 +288,8 @@ class NewMScenarios(unittest.TestCase):
         self.mutate_events(fixture, "identity.jsonl",
                            lambda rows: next(row for row in rows if row["step"] == "B1").update(token="fixture-only-m04"))
         self.reject(fixture, "b_isolated")
-        (fixture.work / 'observe-env.sh').write_text('# bypassed observer\n')
+        observer = 'observe-env.ps1' if evallib.IS_WINDOWS else 'observe-env.sh'
+        (fixture.work / observer).write_text('# bypassed observer\n')
         self.reject(fixture, 'venv_interpreter', 'state_persisted', 'commands_completed')
 
     def test_m05_golden_and_in_place_sigint(self):
@@ -296,6 +327,7 @@ class NewMScenarios(unittest.TestCase):
                                          for row in rows if row['event'] in ('started', 'completed')])
         self.reject(fixture, "priority_order")
 
+    @unittest.skipUnless(HAVE_CURL, 'M08 needs curl')
     def test_m08_golden_and_exact_request_readback(self):
         fixture = self.golden("M08")
         (fixture.work / "answer-request.txt").write_text("REQUEST invented\n")
