@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The Windows statements below describe the pairmux CLI that follows 1.4.0 (native Windows TUI,
+`update` and console-mode prompt detection); all other guidance is unchanged for CLI >=1.0.0.
+
+### Changed
+
+- Windows no longer "refuses `update`" or "relies on wording only". `pairmux update` works on a
+  persistent uv install there (only a custom `UV_TOOL_DIR` run from the bin copy is refused), and
+  secret-prompt detection reads the console's input mode, falling back to wording for tools that
+  read key by key (OpenSSH, Python `getpass`, `Read-Host -AsSecureString`) and for terminals
+  created before the upgrade. The `E_UPDATE` row no longer lists Windows.
+- `pairmux tui` is documented as working on Windows (Windows Terminal or a 1809+ console with VT
+  input; otherwise `E_BAD_ARGS`) instead of "not on Windows yet".
+- The environment list gains `PAIRMUX_CONSOLE_PROBE=0`, which turns the Windows console-mode
+  helper off.
+
 ## [0.5.0] - 2026-11-18
 
 Requires pairmux CLI >=1.4.0 for `events --exit-with-parent` and the `interrupted` status; the
