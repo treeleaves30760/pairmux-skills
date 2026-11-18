@@ -37,7 +37,7 @@ class ProtocolTests(unittest.TestCase):
     def run_check(self, root, env, passes):
         check = self.run_control(root / "check.py", env)
         ledger_path = Path(env.get("PAIRMUX_EVAL_SUBGOALS_FILE", str(root / "subgoals.json")))
-        ledger = json.loads(ledger_path.read_text())
+        ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
         self.assertEqual(ledger["schema"], "pairmux.eval.subgoals.v1")
         self.assertEqual(len(ledger["subgoals"]), 5)
         actual = {e["id"] for e in ledger["subgoals"] if e["pass"]}
@@ -85,7 +85,7 @@ class ProtocolTests(unittest.TestCase):
                         altered = [dict(e) for e in entries if e["event"] != event]
                         for seq, e in enumerate(altered, 1):
                             e["seq"] = seq
-                        events.write_text("".join(json.dumps(e) + "\n" for e in altered))
+                        events.write_text("".join(json.dumps(e) + "\n" for e in altered), encoding="utf-8")
                         self.run_check(root, env, {"done_marker"})
                         events.write_bytes(original)
                     for event, field, value in (("server_stopped", "reason", "watchdog"),
@@ -93,7 +93,7 @@ class ProtocolTests(unittest.TestCase):
                                                  ("suite_batch", "digest", "fabricated")):
                         altered = [dict(e) for e in entries]
                         next(e for e in altered if e["event"] == event)[field] = value
-                        events.write_text("".join(json.dumps(e) + "\n" for e in altered))
+                        events.write_text("".join(json.dumps(e) + "\n" for e in altered), encoding="utf-8")
                         self.run_check(root, env, {"done_marker"})
                         events.write_bytes(original)
                     # Serial/lifecycle tamper: readiness before any test work.
@@ -103,7 +103,7 @@ class ProtocolTests(unittest.TestCase):
                     altered.insert(1, ready)
                     for seq, e in enumerate(altered, 1):
                         e["seq"], e["at_ns"] = seq, seq
-                    events.write_text("".join(json.dumps(e) + "\n" for e in altered))
+                    events.write_text("".join(json.dumps(e) + "\n" for e in altered), encoding="utf-8")
                     self.run_check(root, env, {"done_marker"})
                     events.write_bytes(original)
                     self.run_check(root, env, all_ids)
@@ -117,7 +117,7 @@ class ProtocolTests(unittest.TestCase):
                                                  ("suite_started", "fatal_present", True)):
                         altered = [dict(e) for e in entries]
                         next(e for e in altered if e["event"] == event)[field] = value
-                        events.write_text("".join(json.dumps(e) + "\n" for e in altered))
+                        events.write_text("".join(json.dumps(e) + "\n" for e in altered), encoding="utf-8")
                         self.run_check(root, env, {"done_marker"})
                         events.write_bytes(original)
                     # Same checks under runner work/control isolation: no golden,
@@ -160,13 +160,13 @@ def golden(harness: str) -> None:
         if zsh:
             os.environ["SHELL"] = zsh
         os.environ.update(HOME=str(golden_home), ZDOTDIR=str(golden_home))
-        (golden_home / ".zshenv").write_text(f"export PATH={shlex.quote(os.environ['PATH'])}\n")
+        (golden_home / ".zshenv").write_text(f"export PATH={shlex.quote(os.environ['PATH'])}\n", encoding="utf-8")
     os.chdir(scen)
 
     def has_event(name):
         try:
             return any(json.loads(line).get("event") == name
-                       for line in events_path.read_text().splitlines())
+                       for line in events_path.read_text(encoding="utf-8").splitlines())
         except (OSError, json.JSONDecodeError):
             return False
 
@@ -205,13 +205,13 @@ def golden(harness: str) -> None:
             evallib.pmx("run", "m01work", dig)
             evallib.pmx("send", "m01server", "--text", "y", "--enter")
         else:
-            lines = [line for line in (scen / "noisy.log").read_text().splitlines() if "FATAL" in line]
+            lines = [line for line in (scen / "noisy.log").read_text(encoding="utf-8").splitlines() if "FATAL" in line]
             with open("answer-fatal.txt", "w", encoding="utf-8", newline="\n") as handle:
                 handle.write("".join(line + "\n" for line in lines))
             tmux("send-keys", "-t", "m01:server", "-l", "y")
             tmux("send-keys", "-t", "m01:server", "Enter")
         wait_event("server_ready")
-        port = (scen / "server-port.txt").read_text().strip()
+        port = (scen / "server-port.txt").read_text(encoding="utf-8").strip()
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/status", timeout=10) as response:
             (scen / "answer-server.txt").write_bytes(response.read())
         wait_event("suite_completed")

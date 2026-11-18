@@ -1131,6 +1131,20 @@ def isolated_version_probe_env(
     return clean
 
 
+def host_home_directory() -> Path:
+    """The host user's home, whose skills must never leak into an isolated agent.
+
+    POSIX: HOME. Windows: the profile (USERPROFILE), else HOME. Path.home() raises on Windows
+    when USERPROFILE/HOMEPATH are absent (a sealed environment), so HOME is consulted first."""
+    if IS_WINDOWS:
+        for name in ("USERPROFILE", "HOME"):
+            value = os.environ.get(name)
+            if value:
+                return Path(value)
+        return Path.home()
+    return Path(os.environ.get("HOME", "~")).expanduser()
+
+
 def windows_isolated_home(isolated_home: Path) -> dict[str, str]:
     """On Windows, programs find the profile through USERPROFILE/APPDATA/LOCALAPPDATA, not HOME:
     point all of them into the isolated HOME (HOMEDRIVE/HOMEPATH are never copied)."""
@@ -1235,7 +1249,8 @@ def git_provenance(root: Path = EVALS_DIR.parent) -> dict[str, object]:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
         )
 
@@ -1349,7 +1364,8 @@ def run_discovery_command(
     if endpoint is None:
         completed = subprocess.run(
             argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=timeout,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, encoding="utf-8", errors="replace",
+            timeout=timeout,
         )
         evidence_path.write_text(completed.stdout, encoding="utf-8")
         return completed
@@ -1445,7 +1461,8 @@ def codex_discovery_skill_paths(output: str, isolated_home: Path) -> dict[str, P
                 if match is None:
                     continue
                 name, reference = match.groups()
-                if reference.startswith("/"):
+                if reference.startswith("/") or Path(reference).is_absolute():
+                    # Legacy full paths: POSIX, or a drive-qualified Windows path.
                     path = Path(reference).resolve()
                 else:
                     components = reference.split("/")
@@ -1827,7 +1844,8 @@ def prepare_agent_project_isolation(
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=10,
             )
         except (OSError, subprocess.TimeoutExpired) as error:
@@ -3551,7 +3569,7 @@ def run_episode(
         endpoint=endpoint,
     )
 
-    host_home = Path.home() if IS_WINDOWS else Path(os.environ.get("HOME", "~")).expanduser()
+    host_home = host_home_directory()
     clean_env = isolated_agent_env(
         os.environ.copy(), agent=agent, isolated_home=isolated_home, endpoint=endpoint
     )

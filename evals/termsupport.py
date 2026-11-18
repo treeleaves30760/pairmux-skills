@@ -17,9 +17,20 @@ from __future__ import annotations
 import os
 import re
 import sys
+import time
 
 IS_WINDOWS = os.name == "nt"
 _LAUNCHER = re.compile(r"(?:pyw?|pythonw?(?:3(?:\.\d+)?)?(?:_d)?)\.exe")
+
+
+def event_ns() -> int:
+    """A system-wide monotonic timestamp that orders fixture events across processes.
+
+    POSIX: time.monotonic_ns(), exactly as the fixtures always recorded. Windows before Python
+    3.13 backs monotonic() with GetTickCount64 (~15.6 ms ticks), so back-to-back events would tie
+    and fail the checks' strict ordering; perf_counter_ns() is QueryPerformanceCounter, which is
+    likewise system-wide and monotonic, with sub-microsecond resolution."""
+    return time.perf_counter_ns() if IS_WINDOWS else time.monotonic_ns()
 
 if IS_WINDOWS:
     import ctypes

@@ -19,7 +19,7 @@ def text(name):
 
 
 try:
-    rows = [json.loads(line) for line in (root / 'server-events.jsonl').read_text().splitlines()]
+    rows = [json.loads(line) for line in (root / 'server-events.jsonl').read_text(encoding="utf-8").splitlines()]
 except (OSError, ValueError):
     rows = []
 

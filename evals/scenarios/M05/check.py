@@ -9,7 +9,7 @@ import evallib  # noqa: E402
 
 root = evallib.scenario_dir(__file__).resolve()
 try:
-    rows = [json.loads(line) for line in (root / 'jobs.jsonl').read_text().splitlines()]
+    rows = [json.loads(line) for line in (root / 'jobs.jsonl').read_text(encoding="utf-8").splitlines()]
 except (OSError, ValueError):
     rows = []
 

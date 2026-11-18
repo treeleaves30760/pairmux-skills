@@ -165,7 +165,12 @@ class Job:
             raise OSError(ctypes.get_last_error(), "CreateJobObjectW failed")
 
     def assign(self, process: subprocess.Popen) -> bool:
-        return bool(kernel32.AssignProcessToJobObject(self.handle, int(process._handle)))
+        """Put a launched process in this job; False when it has no real process handle (a
+        Popen stand-in), leaving the caller on its taskkill fallback."""
+        handle = getattr(process, "_handle", None)
+        if not isinstance(handle, int):
+            return False
+        return bool(kernel32.AssignProcessToJobObject(self.handle, int(handle)))
 
     def active_processes(self) -> int:
         info = _BasicAccounting()

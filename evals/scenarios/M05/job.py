@@ -20,7 +20,7 @@ if JOB not in ('alpha', 'beta', 'hang', 'recover') or not sys.stdin.isatty():
 def record(event, **fields):
     ppid, sid, tty = termsupport.identity(0)
     row = dict(event=event, job=JOB, pid=os.getpid(), ppid=ppid, sid=sid,
-               tty=tty, cwd=os.getcwd(), time_ns=time.monotonic_ns(), **fields)
+               tty=tty, cwd=os.getcwd(), time_ns=termsupport.event_ns(), **fields)
     descriptor = os.open(LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     try:
         os.write(descriptor, (json.dumps(row) + '\n').encode())
@@ -30,7 +30,7 @@ def record(event, **fields):
 
 def records():
     try:
-        return [json.loads(line) for line in LOG.read_text().splitlines()]
+        return [json.loads(line) for line in LOG.read_text(encoding="utf-8").splitlines()]
     except (OSError, ValueError):
         return []
 
@@ -54,7 +54,7 @@ signal.signal(signal.SIGINT, interrupted)
 signal.signal(signal.SIGTERM, interrupted)
 if JOB == 'recover':
     record('recovered')
-    (ROOT / 'recovery.txt').write_text('RECOVERED same live terminal\n')
+    (ROOT / 'recovery.txt').write_text('RECOVERED same live terminal\n', encoding="utf-8")
     print('RECOVERED same live terminal', flush=True)
 else:
     record('started')
@@ -75,6 +75,6 @@ else:
         print(f'{JOB}: progressed while hang was live', flush=True)
         await_event(lambda rows: any(row['event'] == 'recovered' for row in rows))
         line = f'{JOB.upper()} COMPLETE'
-        (ROOT / f'{JOB}.txt').write_text(line + '\n')
+        (ROOT / f'{JOB}.txt').write_text(line + '\n', encoding="utf-8")
         record('completed')
         print(line, flush=True)

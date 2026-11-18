@@ -20,8 +20,8 @@ STOP = None
 def record(event, **fields):
     ppid, sid, tty = termsupport.identity(0)
     row = dict(event=event, pid=os.getpid(), ppid=ppid, sid=sid,
-               tty=tty, cwd=os.getcwd(), time_ns=time.monotonic_ns(), **fields)
-    with (ROOT / 'server-events.jsonl').open('a') as handle:
+               tty=tty, cwd=os.getcwd(), time_ns=termsupport.event_ns(), **fields)
+    with (ROOT / 'server-events.jsonl').open('a', encoding="utf-8") as handle:
         handle.write(json.dumps(row) + '\n')
 
 
@@ -37,7 +37,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         receipt = secrets.token_hex(8)
         line = f'REQUEST receipt={receipt} method=GET path=/status status=200 server_pid={os.getpid()} port={self.server.server_port}'
-        with (ROOT / 'requests.log').open('a') as handle:
+        with (ROOT / 'requests.log').open('a', encoding="utf-8") as handle:
             handle.write(line + '\n')
         record('request', line=line, receipt=receipt, path=self.path, status=200,
                user_agent=self.headers.get('User-Agent', ''), client=self.client_address[0])
@@ -57,7 +57,7 @@ if not (sys.stdin.isatty() and sys.stdout.isatty()):
     raise SystemExit('start this server in a live terminal')
 signal.signal(signal.SIGINT, stop)
 signal.signal(signal.SIGTERM, stop)
-(ROOT / 'server.pid').write_text(str(os.getpid()) + '\n')
+(ROOT / 'server.pid').write_text(str(os.getpid()) + '\n', encoding="utf-8")
 record('started')
 print('BOOTING localhost integration server', flush=True)
 server = None
@@ -67,7 +67,7 @@ try:
         raise SystemExit('server interrupted before readiness')
     server = HTTPServer(('127.0.0.1', 0), Handler)
     server.timeout = 0.2 * float(os.environ.get('EVAL_TIME_SCALE', '1'))
-    (ROOT / 'server-port.txt').write_text(str(server.server_port) + '\n')
+    (ROOT / 'server-port.txt').write_text(str(server.server_port) + '\n', encoding="utf-8")
     record('ready', port=server.server_port, token=TOKEN)
     print(f'READY http://127.0.0.1:{server.server_port}/status', flush=True)
     while STOP is None:

@@ -14,7 +14,7 @@ pmx("new", "--name", "m06queue", "--cwd", str(SCEN_DIR))
 pmx("run", "m06queue", f"{PY} queue.py checkpoint", "--timeout", "15s")
 pmx("wait", "m06queue", "--idle", "150", "--timeout", "15s")
 assert "HUMAN NOTE" in evallib.pmx_json("peek", "m06queue")["output"]
-lines = (SCEN_DIR / "priority.txt").read_text().splitlines()
+lines = (SCEN_DIR / "priority.txt").read_text(encoding="utf-8").splitlines()
 revision = dict(line.strip().split("=", 1) for line in lines)["revision"]
 pmx("run", "m06queue", f"{PY} queue.py ack {revision}")
 for job in ("release", "tests", "docs"):

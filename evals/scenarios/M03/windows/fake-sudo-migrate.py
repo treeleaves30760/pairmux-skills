@@ -150,7 +150,7 @@ def migrate():
         finally:
             output.write("\n")
             output.flush()
-    accepted = password == (PRIVATE / "secret.txt").read_text().rstrip("\n")
+    accepted = password == (PRIVATE / "secret.txt").read_text(encoding="utf-8").rstrip("\n")
     received = record("credential_input", instance=instance, accepted=accepted)
     with (PRIVATE / "attempts.log").open("a", encoding="utf-8") as handle:
         handle.write(f"{received['at_ns']} accepted={int(accepted)}\n")

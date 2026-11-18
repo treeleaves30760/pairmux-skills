@@ -20,7 +20,7 @@ root, private = (Path(arg).resolve() for arg in sys.argv[1:3])
 
 def atomic(path, content):
     temporary = path.with_name(path.name + '.tmp')
-    temporary.write_text(content)
+    temporary.write_text(content, encoding="utf-8")
     temporary.replace(path)
 
 
@@ -54,24 +54,24 @@ while time.monotonic() < deadline:
     if not private.is_dir() or not root.is_dir():
         raise SystemExit('episode directories were removed')
     owner = private / 'human.pid'
-    if owner.exists() and owner.read_text().strip() not in ('', str(os.getpid())):
+    if owner.exists() and owner.read_text(encoding="utf-8").strip() not in ('', str(os.getpid())):
         raise SystemExit('this companion has been superseded')
     try:
-        checkpoint = json.loads((root / 'checkpoint.json').read_text())
-        rows = [json.loads(line) for line in (root / 'queue.jsonl').read_text().splitlines()]
+        checkpoint = json.loads((root / 'checkpoint.json').read_text(encoding="utf-8"))
+        rows = [json.loads(line) for line in (root / 'queue.jsonl').read_text(encoding="utf-8").splitlines()]
         event = next(row for row in rows if row['event'] == 'checkpoint')
         valid = evallib.pid_alive(checkpoint['pid'])
         valid = valid and checkpoint == event and evallib.same_path(event['cwd'], root)
         valid = valid and event['tty'].startswith(evallib.TTY_PREFIX)
         valid = valid and live_identity(event)
-        valid = valid and event['time_ns'] < time.monotonic_ns()
+        valid = valid and event['time_ns'] < evallib.event_ns()
     except (OSError, ValueError, KeyError, IndexError, StopIteration, subprocess.SubprocessError):
         valid = False
     if valid:
         revision = 'human-' + secrets.token_hex(6)
         note = f'HUMAN NOTE {revision}: release first, then tests, then docs; acknowledge this revision before starting work.'
         proof = dict(revision=revision, order=['release', 'tests', 'docs'], note=note,
-                     checkpoint=checkpoint, human_pid=os.getpid(), time_ns=time.monotonic_ns())
+                     checkpoint=checkpoint, human_pid=os.getpid(), time_ns=evallib.event_ns())
         atomic(private / 'revision.json', json.dumps(proof) + '\n')
         atomic(root / 'human-note.txt', note + '\n')
         # priority.txt is the publish marker; preceding files are complete first.

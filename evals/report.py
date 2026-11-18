@@ -645,6 +645,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.output is not None:
             args.output.expanduser().write_text(markdown, encoding="utf-8")
         else:
+            # Same bytes as --output: UTF-8, never the Windows ANSI code page of a pipe.
+            if hasattr(sys.stdout, "reconfigure"):
+                sys.stdout.reconfigure(encoding="utf-8")
             sys.stdout.write(markdown)
         if args.json_output is not None:
             args.json_output.expanduser().write_text(json.dumps(report, ensure_ascii=True, sort_keys=True, indent=2, allow_nan=False) + "\n", encoding="utf-8")

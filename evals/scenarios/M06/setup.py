@@ -14,7 +14,7 @@ for name in ("queue.jsonl", "checkpoint.json", "priority.txt", "human-note.txt",
     (SCEN_DIR / name).unlink(missing_ok=True)
 private = Path(env["PAIRMUX_STATE_DIR"]) / "m06-human"
 private.mkdir(parents=True, exist_ok=True)
-(SCEN_DIR / "priority.txt").write_text("revision=initial\norder=docs,tests,release\n")
+(SCEN_DIR / "priority.txt").write_text("revision=initial\norder=docs,tests,release\n", encoding="utf-8")
 evallib.prepare_fixtures(__file__, SCEN_DIR, terminal_support=True)
 if not evallib.IS_WINDOWS:
     fixture = SCEN_DIR / "queue.py"
@@ -22,5 +22,5 @@ if not evallib.IS_WINDOWS:
 human = evallib.spawn_detached(
     evallib.python_argv(evallib.script_dir(__file__) / "human.py", str(SCEN_DIR), str(private)),
     log_path=private / "human.log")
-(private / "human.pid").write_text(f"{human.pid}\n")
+(private / "human.pid").write_text(f"{human.pid}\n", encoding="utf-8")
 print("M06 ready: initial docs/tests/release queue; a human will revise it at the live checkpoint.")

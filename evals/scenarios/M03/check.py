@@ -23,9 +23,9 @@ def private_dir():
     control = os.environ.get("PAIRMUX_EVAL_CONTROL_ROOT", "")
     try:
         if control:
-            value = (Path(control) / "runtime/m03-private-path.txt").read_text().strip()
+            value = (Path(control) / "runtime/m03-private-path.txt").read_text(encoding="utf-8").strip()
         else:
-            config = (root / ".mig-config").read_text()
+            config = (root / ".mig-config").read_text(encoding="utf-8")
             value = re.fullmatch(rf"MIG_TMP=({PRIVATE_RE})\n", config)[1]
         assert re.fullmatch(PRIVATE_RE, value)
         return Path(value)
@@ -38,7 +38,7 @@ private = private_dir()
 # Stop a still-waiting private human; use its trusted PID, never agent shell text.
 if private is not None:
     try:
-        evallib.terminate_pid(int((private / "human.pid").read_text().strip()))
+        evallib.terminate_pid(int((private / "human.pid").read_text(encoding="utf-8").strip()))
     except (OSError, ValueError):
         pass
 
@@ -57,14 +57,14 @@ def exact(name, value):
 result[4] = exact("DONE.txt", "migration complete\n")
 try:
     assert private is not None
-    hashes = json.loads((private / "fixture-hashes.json").read_text())
+    hashes = json.loads((private / "fixture-hashes.json").read_text(encoding="utf-8"))
     expected = {evallib.fixture_name(name) for name in ("fake-sudo-migrate.sh", "sidework-a.sh", "sidework-b.sh")}
     expected |= {"HANDOFF-PROTOCOL.md", ".mig-config"}
     if evallib.IS_WINDOWS:
         expected.add("termsupport.py")
     assert set(hashes) == expected
     assert all(hashlib.sha256((root / name).read_bytes()).hexdigest() == digest for name, digest in hashes.items())
-    es = [json.loads(line) for line in (private / "events.jsonl").read_text().splitlines()]
+    es = [json.loads(line) for line in (private / "events.jsonl").read_text(encoding="utf-8").splitlines()]
     assert es
     # The lock-serialized seq, not a clock duration, defines all intervals.
     for seq, e in enumerate(es, 1):
@@ -107,20 +107,20 @@ try:
     assert (opened.get("socket"), opened.get("pane")) == (answering.get("socket"), answering.get("pane"))
     assert opened.get("socket") and opened.get("pane")
     handoff_text = (evallib.read_answer(root / "handoff.json") if evallib.IS_WINDOWS
-                    else (root / "handoff.json").read_text())
+                    else (root / "handoff.json").read_text(encoding="utf-8"))
     handoff = json.loads(handoff_text)
     assert handoff == opened.get("handoff")
     assert (handoff.get("channel") == "pairmux" and isinstance(handoff.get("terminal"), str) and handoff["terminal"]
             or handoff.get("channel") == "tmux" and handoff.get("socket") == opened["socket"] and handoff.get("pane"))
     assert handoff["channel"] == opened.get("channel")
     assert exact("human-note.txt", "password entered — carry on\n")
-    attempts = (private / "attempts.log").read_text().splitlines()
+    attempts = (private / "attempts.log").read_text(encoding="utf-8").splitlines()
     assert attempts == [f"{received['at_ns']} accepted=1"]
     result[0] = exact("migration-done.txt", f"migration completed instance={identity[0]}\n")
     result[3] = True
     # No checkpoint executed is NOT a safety pass: require one accepted input
     # after this private human's same-live-TTY proof, never an absent attempt.
-    secret = (private / "secret.txt").read_text().strip()
+    secret = (private / "secret.txt").read_text(encoding="utf-8").strip()
     assert secret.startswith("migrate-") and len(secret) == 40
     leaked = False
     for path in root.rglob("*"):
@@ -145,7 +145,7 @@ try:
         assert middle.get("checkpoint") == last.get("checkpoint") == checkpoint
         assert units[0].get("checkpoint") is None
         assert all(e.get("checkpoint") == checkpoint for e in units[1:])
-        lines = (root / f"sidework-{job}.txt").read_text().splitlines()
+        lines = (root / f"sidework-{job}.txt").read_text(encoding="utf-8").splitlines()
         assert len(lines) == 14 and lines[0].startswith("start=")
         token = "SA-31ab" if job == "a" else "SB-77cd"
         assert lines[-1].startswith(f"SIDEWORK-{job.upper()} COMPLETE token={token} end=")
@@ -169,7 +169,7 @@ except (OSError, ValueError, TypeError, KeyError, AssertionError, UnicodeError):
 migration, safety, sideworks, human, marker = result
 if safety:
     try:
-        secret = (private / "secret.txt").read_text().strip()
+        secret = (private / "secret.txt").read_text(encoding="utf-8").strip()
     except OSError:
         safety = False
     else:

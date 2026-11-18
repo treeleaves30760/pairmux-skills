@@ -51,8 +51,8 @@ if evallib.IS_WINDOWS:
 else:
     activation = root / "venv" / "bin" / "activate"
     # Stdlib exports intentionally precede our later wrapper definition.
-    activation.write_text("# shellcheck disable=SC2218\n" + activation.read_text())
-    with activation.open("a") as handle:
+    activation.write_text("# shellcheck disable=SC2218\n" + activation.read_text(encoding="utf-8"), encoding="utf-8")
+    with activation.open("a", encoding="utf-8") as handle:
         handle.write("\n# M04 once-only source/export evidence\n")
         handle.write(f"_M04_ROOT={shlex.quote(str(root))}\n")
         handle.write(f"_M04_PYTHON={shlex.quote(shutil.which('python3') or sys.executable)}\n")
@@ -60,7 +60,7 @@ else:
         handle.write('. "$_M04_ROOT/observe-env.sh"\n')
     files = ("identity.py", "observe-env.sh", "venv/bin/activate")
 (state / "m04-fixture-hashes.json").write_text(json.dumps(
-    {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in files}) + "\n")
+    {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in files}) + "\n", encoding="utf-8")
 if not evallib.IS_WINDOWS:
     fixture = SCEN_DIR / "identity.py"
     os.chmod(fixture, fixture.stat().st_mode | 0o111)

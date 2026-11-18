@@ -22,7 +22,7 @@ for name in ("alpha", "beta", "hang"):
 path = SCEN_DIR / "jobs.jsonl"
 deadline = time.monotonic() + 15
 while True:
-    rows = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
     ready = any(row['event'] == 'hung_ready' for row in rows)
     ready = ready and all(any(row['job'] == job and row['event'] == 'progress' for row in rows)
                           for job in ('alpha', 'beta'))

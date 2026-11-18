@@ -29,6 +29,12 @@ MOCK_PAIRMUX = "pairmux.exe" if os.name == "nt" else "pairmux"
 KEY = "endpoint-test-secret-do-not-export-71fd"
 
 
+def program(argv0: str) -> str:
+    """The program name of argv[0]; Windows launches agent CLIs through their `.exe`."""
+    name = Path(argv0).name
+    return name[:-4] if os.name == "nt" and name.lower().endswith(".exe") else name
+
+
 class EndpointTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="pairmux-endpoint-test-")
@@ -258,7 +264,7 @@ class EndpointTests(unittest.TestCase):
             if fail_setup and any(Path(value).name == "setup.py" for value in argv):
                 return runner.ProcessResult(1, False, 0.01)
             result = original_process(argv, **kwargs)
-            if Path(argv[0]).name == agent:
+            if program(argv[0]) == agent:
                 captures["agent_env"] = kwargs["env"].copy()
                 if leak:
                     with kwargs["stdout_path"].open("a") as stream:
@@ -302,7 +308,7 @@ class EndpointTests(unittest.TestCase):
                 for env in captures["probes"] + captures["broker_envs"] + [captures["prepare_env"]]:
                     self.assert_sealed(env, agent=agent)
                 for argv, env in captures["processes"]:
-                    self.assert_sealed(env, selected=Path(argv[0]).name == agent, agent=agent)
+                    self.assert_sealed(env, selected=program(argv[0]) == agent, agent=agent)
                 self.assert_sealed(captures["agent_env"], selected=True, agent=agent)
                 self.assert_sealed(captures["discovery_env"], selected=True, agent=agent)
                 self.assertNotIn(KEY, stdout + stderr)
@@ -413,7 +419,7 @@ class EndpointTests(unittest.TestCase):
 
         def process(argv, **kwargs):
             result = original_process(argv, **kwargs)
-            if Path(argv[0]).name == "claude":
+            if program(argv[0]) == "claude":
                 (kwargs["cwd"] / "raw-leak.txt").write_text(KEY)
                 config_paths.append(Path(kwargs["env"]["CLAUDE_CONFIG_DIR"]) / "endpoint-settings.json")
             return result
@@ -534,7 +540,7 @@ class EndpointTests(unittest.TestCase):
                 output = json.dumps(assistant) + "\n" + json.dumps(result) + "\n"
 
                 def process(argv, **kwargs):
-                    if Path(argv[0]).name == "claude":
+                    if program(argv[0]) == "claude":
                         argv = [sys.executable, "-I", "-B", "-c", "import sys; sys.stdout.write(" + repr(output) + "); sys.exit(1)"]
                     return original_process(argv, **kwargs)
 
@@ -680,7 +686,7 @@ class EndpointTests(unittest.TestCase):
                 output = json.dumps({"type": "item.completed", "item": {"type": "error", "message": "Model metadata not found; fallback metadata"}}) + "\n" + json.dumps(event)
 
                 def process(argv, **kwargs):
-                    if Path(argv[0]).name == "codex":
+                    if program(argv[0]) == "codex":
                         argv = [sys.executable, "-I", "-B", "-c", "import sys; sys.stdout.write(" + repr(output) + "); sys.exit(1)"]
                     return original_process(argv, **kwargs)
 
@@ -701,7 +707,7 @@ class EndpointTests(unittest.TestCase):
         callbacks: list[object] = []
 
         def process(argv, **kwargs):
-            if Path(argv[0]).name == "codex":
+            if program(argv[0]) == "codex":
                 callbacks.append(kwargs.get("early_stdout_failure_detector"))
             return original_process(argv, **kwargs)
 

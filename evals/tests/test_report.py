@@ -462,7 +462,7 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(data["groups"][0]["cohort"]["endpoint"]["base_url"], "https://api.example.test/v1")
 
     def invoke(self, *args):
-        return subprocess.run([sys.executable, "-I", str(REPORT), *map(str, args)], cwd=self.root, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+        return subprocess.run([sys.executable, "-I", str(REPORT), *map(str, args)], cwd=self.root, encoding="utf-8", stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
 
     def test_cli_stdout_and_explicit_outputs_do_not_touch_results(self):
         root = self.write_run()

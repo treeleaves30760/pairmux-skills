@@ -4,7 +4,6 @@ import json
 import os
 from pathlib import Path
 import sys
-import time
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
@@ -17,8 +16,8 @@ if len(sys.argv) == 5 and sys.argv[1] in ('activation', 'token_export'):
     row = dict(event=sys.argv[1], shell_pid=int(sys.argv[2]), activation_count=int(sys.argv[3]),
                token_export_count=int(sys.argv[4]), pid=os.getpid(), ppid=ppid,
                sid=sid, tty=tty if sys.stdin.isatty() else None,
-               cwd=os.getcwd(), time_ns=time.monotonic_ns())
-    with (ROOT / 'environment.jsonl').open('a') as handle:
+               cwd=os.getcwd(), time_ns=termsupport.event_ns())
+    with (ROOT / 'environment.jsonl').open('a', encoding="utf-8") as handle:
         handle.write(json.dumps(row) + '\n')
     raise SystemExit(0)
 if len(sys.argv) != 2 or sys.argv[1] not in STEPS:
@@ -30,9 +29,9 @@ row = dict(step=step, pid=os.getpid(), ppid=ppid, sid=sid,
            virtual_env=os.environ.get('VIRTUAL_ENV'), token=os.environ.get('TOKEN'),
            activation_count=os.environ.get('M04_ACTIVATION_COUNT'),
            token_export_count=os.environ.get('M04_TOKEN_EXPORT_COUNT'),
-           time_ns=time.monotonic_ns())
+           time_ns=termsupport.event_ns())
 # Log before validation, so a wrong interpreter or contaminated B is observable.
-with (ROOT / 'identity.jsonl').open('a') as handle:
+with (ROOT / 'identity.jsonl').open('a', encoding="utf-8") as handle:
     handle.write(json.dumps(row) + '\n')
 is_a = step.startswith('A')
 expected_cwd = ROOT / ('a-work' if is_a else 'b-work')
@@ -52,5 +51,5 @@ else:
 if not valid:
     raise SystemExit('wrong terminal working directory, interpreter, or environment')
 line = f'IDENTITY {step} ppid={row["ppid"]} sid={row["sid"]} tty={row["tty"]} cwd={row["cwd"]}'
-(ROOT / STEPS[step]).write_text(line + '\n')
+(ROOT / STEPS[step]).write_text(line + '\n', encoding="utf-8")
 print(line, flush=True)

@@ -18,12 +18,12 @@ FIXTURES = ({'identity.py', 'observe-env.ps1', 'venv/Scripts/Activate.ps1'} if W
 steps = {'A1': 'a-first.txt', 'A2': 'a-second.txt', 'A3': 'a-third.txt',
          'B1': 'b-first.txt', 'B2': 'b-second.txt'}
 try:
-    rows = [json.loads(line) for line in (root / 'identity.jsonl').read_text().splitlines()]
+    rows = [json.loads(line) for line in (root / 'identity.jsonl').read_text(encoding="utf-8").splitlines()]
 except (OSError, ValueError):
     rows = []
 try:
-    events = [json.loads(line) for line in (root / 'environment.jsonl').read_text().splitlines()]
-    hashes = json.loads((state / 'm04-fixture-hashes.json').read_text())
+    events = [json.loads(line) for line in (root / 'environment.jsonl').read_text(encoding="utf-8").splitlines()]
+    hashes = json.loads((state / 'm04-fixture-hashes.json').read_text(encoding="utf-8"))
     trusted = set(hashes) == FIXTURES
     trusted = trusted and all(hashlib.sha256((root / name).read_bytes()).hexdigest() == digest for name, digest in hashes.items())
 except (OSError, ValueError):
@@ -79,7 +79,7 @@ complete = len(rows) == 5 and set(row.get('step') for row in rows) == set(steps)
 for row in rows:
     expected = f'IDENTITY {row.get("step")} ppid={row.get("ppid")} sid={row.get("sid")} tty={row.get("tty")} cwd={row.get("cwd")}'
     try:
-        complete = complete and (root / steps[row['step']]).read_text().strip() == expected
+        complete = complete and (root / steps[row['step']]).read_text(encoding="utf-8").strip() == expected
     except (OSError, KeyError):
         complete = False
 complete = complete and venv and persistent and isolated and interleaved

@@ -66,7 +66,7 @@ def cleanup_scenario(scen_dir: Path) -> None:
     for root in private_dirs:
         for pid_file in root.rglob("human.pid") if root.is_dir() else ():
             try:
-                evallib.terminate_pid(int(pid_file.read_text().strip()))
+                evallib.terminate_pid(int(pid_file.read_text(encoding="utf-8").strip()))
             except (OSError, ValueError):
                 pass
     for root in private_dirs[1:]:

@@ -5,7 +5,6 @@ import json
 import os
 from pathlib import Path
 import sys
-import time
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
@@ -15,8 +14,8 @@ import termsupport  # noqa: E402
 def record(event, **fields):
     ppid, sid, tty = termsupport.identity(0)
     row = dict(event=event, pid=os.getpid(), ppid=ppid, sid=sid,
-               tty=tty, cwd=os.getcwd(), time_ns=time.monotonic_ns(), **fields)
-    with (ROOT / "interaction.jsonl").open("a") as handle:
+               tty=tty, cwd=os.getcwd(), time_ns=termsupport.event_ns(), **fields)
+    with (ROOT / "interaction.jsonl").open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(row) + "\n")
 
 
@@ -74,7 +73,7 @@ def deploy(value):
                 break
     record("pager_exit", value=value)
     line = f"DEPLOYED release={value}"
-    (ROOT / "deployment.txt").write_text(line + "\n")
+    (ROOT / "deployment.txt").write_text(line + "\n", encoding="utf-8")
     record("deployment_complete", value=value)
     print("\n" + line, flush=True)
 

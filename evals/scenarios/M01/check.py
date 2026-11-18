@@ -34,12 +34,12 @@ def exact(name, expected):
 result[4] = exact("DONE.txt", "all three complete\n")
 try:
     prefix = "# M01 fixture-hashes "
-    lines = [line[len(prefix):] for line in env_file.read_text().splitlines() if line.startswith(prefix)]
+    lines = [line[len(prefix):] for line in env_file.read_text(encoding="utf-8").splitlines() if line.startswith(prefix)]
     assert len(lines) == 1
     hashes = json.loads(lines[0])
     assert set(hashes) == expected_names
     assert all(hashlib.sha256((root / name).read_bytes()).hexdigest() == digest for name, digest in hashes.items())
-    entries = [json.loads(line) for line in (root / "m01-events.jsonl").read_text().splitlines()]
+    entries = [json.loads(line) for line in (root / "m01-events.jsonl").read_text(encoding="utf-8").splitlines()]
     assert entries
     # The lock-serialized seq is the logical clock; wall time is diagnostic
     # only (old macOS Python versions have process-relative monotonic clocks).
@@ -70,7 +70,7 @@ try:
     assert suite_started["seq"] < batches[0]["seq"] < reviewed["seq"] < approved["seq"] < ready["seq"]
     assert reviewed.get("digest") == hashlib.sha256(fatal.encode()).hexdigest()
     assert isinstance(prompt.get("tty"), str) and prompt["tty"].startswith(tty_prefix)
-    port = int((root / "server-port.txt").read_text().strip())
+    port = int((root / "server-port.txt").read_text(encoding="utf-8").strip())
     assert 1 <= port <= 65535 and ready.get("port") == port
     requests = [e for e in entries if e.get("event") == "status_requested"]
     assert requests
@@ -99,7 +99,7 @@ try:
     result[0] = exact("answer-server.txt", "SERVER-OK-7f3a")
     result[1] = exact("test-report.txt", report) and exact("answer-tests.txt", report)
     result[2] = exact("answer-fatal.txt", fatal) and [line + "\n" for line in
-        (root / "noisy.log").read_text().splitlines() if "FATAL" in line] == [fatal]
+        (root / "noisy.log").read_text(encoding="utf-8").splitlines() if "FATAL" in line] == [fatal]
     sock = socket.socket()
     sock.settimeout(1)
     try:

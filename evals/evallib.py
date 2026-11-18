@@ -30,6 +30,16 @@ import sys
 import time
 
 IS_WINDOWS = os.name == "nt"
+
+
+def event_ns() -> int:
+    """A system-wide monotonic timestamp that orders fixture events across processes (as termsupport.event_ns).
+
+    POSIX: time.monotonic_ns(), exactly as the fixtures always recorded. Windows before Python
+    3.13 backs monotonic() with GetTickCount64 (~15.6 ms ticks), so back-to-back events would tie
+    and fail the checks' strict ordering; perf_counter_ns() is QueryPerformanceCounter, which is
+    likewise system-wide and monotonic, with sub-microsecond resolution."""
+    return time.perf_counter_ns() if IS_WINDOWS else time.monotonic_ns()
 EVALS_DIR = Path(__file__).resolve().parent
 # What a scenario's terminal commands call the interpreter. Windows installs `python` (a
 # `python3` there is usually the Microsoft Store stub); POSIX keeps the historical `python3`.

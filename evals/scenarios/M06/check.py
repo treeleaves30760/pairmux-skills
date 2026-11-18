@@ -21,8 +21,8 @@ def text(path):
 
 
 try:
-    rows = [json.loads(line) for line in (root / 'queue.jsonl').read_text().splitlines()]
-    proof = json.loads((private / 'revision.json').read_text())
+    rows = [json.loads(line) for line in (root / 'queue.jsonl').read_text(encoding="utf-8").splitlines()]
+    proof = json.loads((private / 'revision.json').read_text(encoding="utf-8"))
 except (OSError, ValueError):
     rows, proof = [], {}
 
