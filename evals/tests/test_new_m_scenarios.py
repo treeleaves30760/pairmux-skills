@@ -31,6 +31,27 @@ LIVE_TOOLS = (evallib.is_executable(REAL_BIN) and (evallib.IS_WINDOWS or bool(TE
 POSIX_ONLY = unittest.skipIf(evallib.IS_WINDOWS, 'splices POSIX shell syntax into the golden')
 
 
+def real_cli_version():
+    """The (major, minor, patch) of PAIRMUX_REAL_BIN, or None if unknown."""
+    if not REAL_BIN:
+        return None
+    try:
+        out = subprocess.run([REAL_BIN, '--version'], capture_output=True, text=True,
+                             encoding='utf-8', timeout=30).stdout.strip()
+        return tuple(int(part) for part in out.split('-')[0].split('.')[:3])
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def windows_multiline_send_is_joined():
+    """pairmux <=1.4.0 typed LF verbatim on Windows, where a console does not end a line at LF,
+    so a multi-line `send --text` reached the REPL as one joined line. Fixed after 1.4.0."""
+    if not evallib.IS_WINDOWS:
+        return False
+    version = real_cli_version()
+    return version is None or version <= (1, 4, 0)
+
+
 class Fixture:
     def __init__(self, scenario):
         self.tmp = tempfile.TemporaryDirectory(prefix="pmx-new-m-")
@@ -215,6 +236,9 @@ class NewMScenarios(unittest.TestCase):
                            'left=1234; right=5678; product=left*right; print(product)',
                            'left=1234\nright=5678\nproduct=left*right\nprint(product)'):
             with self.subTest(expression=expression):
+                if '\n' in expression and windows_multiline_send_is_joined():
+                    self.skipTest('pairmux <=1.4.0 joins multi-line send --text on Windows '
+                                  '(LF is not Enter in a console); fixed in the next CLI release')
                 fixture = self.fixture('M02')
                 self.splice_golden(fixture, "EXPRESSION = '1234 * 5678'", f"EXPRESSION = {expression!r}")
                 fixture.run('golden.py')
