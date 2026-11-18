@@ -282,6 +282,10 @@ class EndpointTests(unittest.TestCase):
         for name, value in self.env.items():
             if name in {"PATH", "HOME", "PAIRMUX_MOCK_AGENT_LOG", "PAIRMUX_MOCK_VERSION_LOG"}:
                 continue
+            if os.name == "nt" and name.upper() in runner.WINDOWS_SYSTEM_ENV_NAMES:
+                # OS/machine locators every Windows process needs; never profile or credentials.
+                self.assertEqual(env.get(name), value)
+                continue
             if selected and (name == KEY_NAME or name == "ANTHROPIC_API_KEY" and agent == "claude"):
                 self.assertEqual(env.get(name), KEY)
             elif name in {"OPENCODE_CONFIG_DIR", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "ANTHROPIC_BASE_URL"}:

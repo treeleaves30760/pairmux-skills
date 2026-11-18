@@ -38,6 +38,15 @@ import evallib  # noqa: E402  (shared with the scenario control scripts)
 import winsupport  # noqa: E402
 
 IS_WINDOWS = os.name == "nt"
+
+
+def monotonic() -> float:
+    """Seconds on a monotonic clock fine enough for episode, discovery and process durations.
+
+    POSIX: time.monotonic(). Windows before Python 3.13 backs monotonic() with GetTickCount64
+    (~15.6 ms ticks), so short durations read as 0.0; perf_counter() (QueryPerformanceCounter)
+    is monotonic with sub-microsecond resolution."""
+    return time.perf_counter() if IS_WINDOWS else time.monotonic()
 # Windows has no SIGKILL; a forced TerminateProcess/TerminateJobObject is recorded with this value
 # (and a graceful-tier termination as SIGTERM) so call ledgers keep one shape on every platform.
 SIGKILL = getattr(signal, "SIGKILL", 9)
@@ -734,10 +743,10 @@ def terminate_process_group(
         if process.poll() is not None:
             return None
         process.terminate()
-    deadline = time.monotonic() + grace_seconds
-    while time.monotonic() < deadline:
+    deadline = monotonic() + grace_seconds
+    while monotonic() < deadline:
         try:
-            process.wait(timeout=min(0.05, max(0.001, deadline - time.monotonic())))
+            process.wait(timeout=min(0.05, max(0.001, deadline - monotonic())))
         except subprocess.TimeoutExpired:
             pass
         if os.name == "posix":
@@ -935,7 +944,7 @@ def run_process(
     early_stdout_failure_detector: Callable[[object], str | None] | None = None,
 ) -> ProcessResult:
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
-    started = time.monotonic()
+    started = monotonic()
     with stdout_path.open("wb") as stdout_stream:
         stderr_stream = None
         if not merge_stderr and stderr_path is not None:
@@ -957,7 +966,7 @@ def run_process(
                 message = f"{type(error).__name__}: {error}"
                 if stderr_stream is not None:
                     stderr_stream.write((message + "\n").encode())
-                return ProcessResult(None, False, round(time.monotonic() - started, 6), message)
+                return ProcessResult(None, False, round(monotonic() - started, 6), message)
             stderr_offset = 0
             stderr_tail = ""
             stdout_offset = 0
@@ -1011,7 +1020,7 @@ def run_process(
                     return ProcessResult(
                         process.poll(),
                         False,
-                        round(time.monotonic() - started, 6),
+                        round(monotonic() - started, 6),
                         termination_signal=termination_signal,
                         observed_failure_class=detected,
                     )
@@ -1023,12 +1032,12 @@ def run_process(
                     return ProcessResult(
                         returncode,
                         False,
-                        round(time.monotonic() - started, 6),
+                        round(monotonic() - started, 6),
                         termination_signal=cleanup_signal,
                         observed_failure_class=detected,
                     )
 
-                remaining = deadline - time.monotonic()
+                remaining = deadline - monotonic()
                 if remaining <= 0:
                     detected = observed_failure()
                     if detected is not None:
@@ -1036,7 +1045,7 @@ def run_process(
                         return ProcessResult(
                             process.poll(),
                             False,
-                            round(time.monotonic() - started, 6),
+                            round(monotonic() - started, 6),
                             termination_signal=termination_signal,
                             observed_failure_class=detected,
                         )
@@ -1049,7 +1058,7 @@ def run_process(
                         return ProcessResult(
                             returncode,
                             False,
-                            round(time.monotonic() - started, 6),
+                            round(monotonic() - started, 6),
                             termination_signal=cleanup_signal,
                             observed_failure_class=detected,
                         )
@@ -1058,7 +1067,7 @@ def run_process(
                     return ProcessResult(
                         process.poll(),
                         True,
-                        round(time.monotonic() - started, 6),
+                        round(monotonic() - started, 6),
                         termination_signal=termination_signal,
                         timeout_inflight_call_ids=tuple(inflight),
                     )
@@ -1072,7 +1081,7 @@ def run_process(
                 return ProcessResult(
                     returncode,
                     False,
-                    round(time.monotonic() - started, 6),
+                    round(monotonic() - started, 6),
                     termination_signal=cleanup_signal,
                     observed_failure_class=detected,
                 )
@@ -2246,10 +2255,10 @@ class PairmuxBroker:
     ) -> tuple[dict[str, object], list[int | None]]:
         """Named-pipe request: the JSON payload, then the client's three std handle values,
         duplicated here out of the kernel-identified client (the SCM_RIGHTS analogue)."""
-        deadline = time.monotonic() + 5.0
+        deadline = monotonic() + 5.0
 
         def receive(limit: int) -> bytes:
-            if not connection.poll(max(0.0, deadline - time.monotonic())):
+            if not connection.poll(max(0.0, deadline - monotonic())):
                 raise ValueError("timed out waiting for the broker request")
             return connection.recv_bytes(limit)
 
@@ -2426,7 +2435,7 @@ class PairmuxBroker:
         record.update(
             {
                 "finished_at": utc_now(),
-                "duration_seconds": round(time.monotonic() - started_monotonic, 6),
+                "duration_seconds": round(monotonic() - started_monotonic, 6),
                 "exit_code": returncode,
             }
         )
@@ -2468,7 +2477,7 @@ class PairmuxBroker:
 
             started_at = utc_now()
             started_ns = time.time_ns()
-            started_monotonic = time.monotonic()
+            started_monotonic = monotonic()
             call_id = uuid.uuid4().hex
             record: dict[str, object] = {
                 "schema": CALL_SCHEMA,
@@ -2544,9 +2553,9 @@ class PairmuxBroker:
                 if execution.cancel.wait(0.05):
                     if termination_sent is None:
                         termination_sent = signal.SIGTERM
-                        termination_deadline = time.monotonic() + 1.0
+                        termination_deadline = monotonic() + 1.0
                         self._signal_child(process, signal.SIGTERM)
-                    elif termination_deadline and time.monotonic() >= termination_deadline:
+                    elif termination_deadline and monotonic() >= termination_deadline:
                         termination_sent = SIGKILL
                         termination_deadline = None
                         self._signal_child(process, SIGKILL)
@@ -2671,11 +2680,11 @@ class PairmuxBroker:
                 execution.cancel.set()
         if self._listener_thread is not None:
             self._listener_thread.join(timeout)
-        deadline = time.monotonic() + timeout
+        deadline = monotonic() + timeout
         with self._lock:
             handlers = list(self._handler_threads)
         for handler in handlers:
-            handler.join(max(0.0, deadline - time.monotonic()))
+            handler.join(max(0.0, deadline - monotonic()))
         live_handlers = [handler.name for handler in handlers if handler.is_alive()]
         if live_handlers:
             self._error(f"broker handlers did not stop: {live_handlers}")
@@ -3490,7 +3499,7 @@ def run_episode(
     if endpoint is not None and endpoint_secret is None:
         raise ValueError("endpoint execution requires a runtime credential")
     episode_started_at = utc_now()
-    episode_started = time.monotonic()
+    episode_started = monotonic()
     uniqueness = hashlib.sha256(f"{run_id}:{scenario}:{repetition}".encode()).hexdigest()[:12]
     episode_id = f"{scenario}-r{repetition:02d}-{uniqueness[:6]}"
     episode_root = run_root / "episodes" / episode_id
@@ -3697,7 +3706,7 @@ def run_episode(
                 )
             if terminal_harness == "pmx-cli":
                 assert skill_dir is not None
-                discovery_started = time.monotonic()
+                discovery_started = monotonic()
                 try:
                     discovery = verify_skill_discovery(
                         agent=agent,
@@ -3715,7 +3724,7 @@ def run_episode(
                         endpoint_config_path=endpoint_config_path,
                     )
                 finally:
-                    discovery_duration_seconds = round(time.monotonic() - discovery_started, 6)
+                    discovery_duration_seconds = round(monotonic() - discovery_started, 6)
             else:
                 discovery = {
                     "verified": False,
@@ -3990,7 +3999,7 @@ def run_episode(
         "pass": category is None,
         "outcome": outcome,
         "steps": len(calls),
-        "wall_time_seconds": round(time.monotonic() - episode_started, 6),
+        "wall_time_seconds": round(monotonic() - episode_started, 6),
         "discovery_duration_seconds": discovery_duration_seconds,
         "agent_duration_seconds": agent_result.duration_seconds if agent_result else None,
         "failure_class": category,
@@ -4181,7 +4190,7 @@ def summarize(
         "run_id": run_id,
         "started_at": started_at,
         "finished_at": utc_now(),
-        "wall_time_seconds": round(time.monotonic() - started_monotonic, 6),
+        "wall_time_seconds": round(monotonic() - started_monotonic, 6),
         "agent": agent,
         "agent_version": agent_version,
         "model": model or "default",
@@ -4543,7 +4552,7 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(str(error))
 
     run_started_at = utc_now()
-    run_started = time.monotonic()
+    run_started = monotonic()
     git_start = git_provenance()
     run_id, run_root = make_run_root(args.output_dir)
     agent_executable = str(Path(shutil.which(args.agent) or args.agent).resolve())
@@ -4564,7 +4573,7 @@ def main(argv: list[str] | None = None) -> int:
         for scenario in scenarios:
             for repetition in range(1, args.repeat + 1):
                 episode_attempt_started_at = utc_now()
-                episode_attempt_started = time.monotonic()
+                episode_attempt_started = monotonic()
                 try:
                     result = run_episode(
                         run_root=run_root,
@@ -4625,7 +4634,7 @@ def main(argv: list[str] | None = None) -> int:
                         "outcome": "failed",
                         "steps": 0,
                         "broker_policy_rejections": 0,
-                        "wall_time_seconds": round(time.monotonic() - episode_attempt_started, 6),
+                        "wall_time_seconds": round(monotonic() - episode_attempt_started, 6),
                         "started_at": episode_attempt_started_at,
                         "finished_at": utc_now(),
                         "timeout_seconds": args.timeout,
