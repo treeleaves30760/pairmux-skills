@@ -43,7 +43,7 @@ def iter_events(path: Path):
 
 def issued_content(events: list[dict]) -> list[str]:
     """Agent-issued content only (commands and assistant text), mirroring
-    lib.sh's pmx_issued_content across the three transcript dialects."""
+    evallib.issued_content across the three transcript dialects."""
     issued: list[str] = []
     for event in events:
         kind = event.get("type")

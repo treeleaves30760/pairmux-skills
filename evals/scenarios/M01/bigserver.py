@@ -6,7 +6,7 @@ not elapsed seconds, makes work before AND after readiness observable. The
 listener approval is non-secret and must be answered at a live terminal.
 """
 
-import fcntl
+import contextlib
 import hashlib
 import heapq
 import http.server
@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import signal
 import sys
+import threading
 import time
 import uuid
 
@@ -22,25 +23,67 @@ ROOT = Path(__file__).resolve().parent
 EVENTS = ROOT / "m01-events.jsonl"
 TOKEN = "SERVER-OK-7f3a"
 FATAL = "2026-08-01T03:14:07Z FATAL: disk quota exceeded on shard-17 token=FT-55d1"
+WINDOWS = os.name == "nt"
+
+if WINDOWS:
+    import msvcrt
+
+    sys.path.insert(0, str(ROOT))  # -I omits the script directory
+    import termsupport
+else:
+    import fcntl
+
+
+@contextlib.contextmanager
+def locked(handle, exclusive):
+    """flock on POSIX. Windows locks one byte far past any data, so unlocked readers never
+    collide with the mandatory byte-range lock."""
+    if not WINDOWS:
+        fcntl.flock(handle, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        yield
+        return
+    descriptor = os.open(EVENTS, os.O_RDWR | os.O_CREAT)
+    try:
+        os.lseek(descriptor, 1 << 30, os.SEEK_SET)
+        while True:
+            try:
+                msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+                break
+            except OSError:
+                time.sleep(0.01)
+        try:
+            yield
+        finally:
+            os.lseek(descriptor, 1 << 30, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+    finally:
+        os.close(descriptor)
 
 
 def events():
     if not EVENTS.exists():
         return []
-    with EVENTS.open(encoding="utf-8") as handle:
-        fcntl.flock(handle, fcntl.LOCK_SH)
+    with EVENTS.open(encoding="utf-8") as handle, locked(handle, False):
         return [json.loads(line) for line in handle]
 
 
 def record(event, **fields):
-    with EVENTS.open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
+    with EVENTS.open("a+", encoding="utf-8") as handle, locked(handle, True):
         handle.seek(0)
         previous = [json.loads(line) for line in handle]
         entry = {"seq": len(previous) + 1, "event": event, "pid": os.getpid(),
                  "at_ns": time.time_ns(), **fields}
         handle.write(json.dumps(entry, sort_keys=True) + "\n")
         handle.flush()
+
+
+def read_answer(path):
+    """The agent's answer text. Windows tools may add a byte-order mark or write UTF-16."""
+    if not WINDOWS:
+        return path.read_text(encoding="utf-8")
+    data = path.read_bytes()
+    text = data.decode("utf-16") if data.startswith((b"\xff\xfe", b"\xfe\xff")) else data.decode("utf-8-sig")
+    return text.replace("\r\n", "\n")
 
 
 def until(predicate):
@@ -107,14 +150,29 @@ def serve():
     server = None
     reason = "error"
 
+    watchdog_fired = threading.Event()
+
     def interrupt(signum, _frame):
         nonlocal reason
-        reason = "signal" if signum != signal.SIGALRM else "watchdog"
+        watchdog = watchdog_fired.is_set() or signum == getattr(signal, "SIGALRM", None)
+        reason = "watchdog" if watchdog else "signal"
         raise KeyboardInterrupt
 
-    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGALRM):
-        signal.signal(sig, interrupt)
-    signal.alarm(300)
+    for sig in (signal.SIGINT, signal.SIGTERM, getattr(signal, "SIGALRM", None)):
+        if sig is not None:
+            signal.signal(sig, interrupt)
+    if WINDOWS:
+        import _thread
+
+        def fire():
+            watchdog_fired.set()
+            _thread.interrupt_main()
+
+        watchdog = threading.Timer(300, fire)
+        watchdog.daemon = True
+        watchdog.start()
+    else:
+        signal.alarm(300)
     record("server_started", instance=instance, fatal_present=(ROOT / "answer-fatal.txt").exists())
     try:
         print("BOOTING dev server (compiling assets)...", flush=True)
@@ -123,14 +181,18 @@ def serve():
         until(lambda entries: any(e["event"] == "suite_batch" for e in entries))
         # Reading /dev/tty prevents a pre-filled stdin pipe from substituting
         # for the task's live approval, without making the answer a secret.
-        with open("/dev/tty", "r", encoding="utf-8") as tty, open("/dev/tty", "w", encoding="utf-8") as output:
-            record("listener_prompt", instance=instance, tty=os.ttyname(tty.fileno()))
+        # (Windows: the console's CONIN$/CONOUT$.)
+        tty, output = termsupport.open_tty() if WINDOWS else (
+            open("/dev/tty", "r", encoding="utf-8"), open("/dev/tty", "w", encoding="utf-8"))
+        with tty, output:
+            record("listener_prompt", instance=instance,
+                   tty=termsupport.tty_name(tty) if WINDOWS else os.ttyname(tty.fileno()))
             output.write("Enable loopback status endpoint after reviewing FATAL? [y/N] ")
             output.flush()
             answer = tty.readline().strip().lower()
         if answer not in {"y", "yes"}:
             raise RuntimeError("listener not approved")
-        fatal = (ROOT / "answer-fatal.txt").read_text(encoding="utf-8")
+        fatal = read_answer(ROOT / "answer-fatal.txt")
         if fatal != FATAL + "\n":
             raise RuntimeError("review the exact FATAL line before enabling the listener")
         record("fatal_reviewed", instance=instance,
@@ -149,7 +211,8 @@ def serve():
         if server is not None:
             server.server_close()
         record("server_stopped", instance=instance, reason=reason)
-        signal.alarm(0)
+        if not WINDOWS:
+            signal.alarm(0)
 
 
 if __name__ == "__main__":

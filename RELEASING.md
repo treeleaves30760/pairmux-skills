@@ -13,9 +13,10 @@ system packaging belongs to the companion `pairmux` repository.
    skills-ref validate ./skills/pairmux
    DISABLE_TELEMETRY=1 npx --yes skills add . --list
    python3 -m unittest discover -s evals/tests -v
-   python3 -m py_compile evals/run.py evals/pairmux_proxy.py evals/tests/mock_bin.py
-   bash -n evals/lib.sh evals/scenarios/*/setup.sh evals/scenarios/*/check.sh
-   shellcheck evals/lib.sh evals/scenarios/*/setup.sh evals/scenarios/*/check.sh
+   python3 -m py_compile evals/*.py evals/scenarios/*/*.py evals/scenarios/*/windows/*.py
+   python3 evals/test_scenarios.py   # golden self-test; needs pairmux (and tmux for its baselines)
+   bash -n evals/test-scenarios.sh evals/scenarios/*/*.sh
+   shellcheck evals/test-scenarios.sh evals/scenarios/*/*.sh
    ./scripts/validate-commit-subjects.sh --self-test
    ```
 

@@ -32,6 +32,24 @@ from urllib.parse import urlsplit, urlunsplit
 
 
 EVALS_DIR = Path(__file__).resolve().parent
+if str(EVALS_DIR) not in sys.path:
+    sys.path.insert(0, str(EVALS_DIR))
+import evallib  # noqa: E402  (shared with the scenario control scripts)
+import winsupport  # noqa: E402
+
+IS_WINDOWS = os.name == "nt"
+
+
+def monotonic() -> float:
+    """Seconds on a monotonic clock fine enough for episode, discovery and process durations.
+
+    POSIX: time.monotonic(). Windows before Python 3.13 backs monotonic() with GetTickCount64
+    (~15.6 ms ticks), so short durations read as 0.0; perf_counter() (QueryPerformanceCounter)
+    is monotonic with sub-microsecond resolution."""
+    return time.perf_counter() if IS_WINDOWS else time.monotonic()
+# Windows has no SIGKILL; a forced TerminateProcess/TerminateJobObject is recorded with this value
+# (and a graceful-tier termination as SIGTERM) so call ledgers keep one shape on every platform.
+SIGKILL = getattr(signal, "SIGKILL", 9)
 SCENARIOS_DIR = EVALS_DIR / "scenarios"
 PROXY_SOURCE = EVALS_DIR / "pairmux_proxy.py"
 SKILL_SOURCE = EVALS_DIR.parent / "skills" / "pairmux"
@@ -68,6 +86,19 @@ ENDPOINT_SAFE_ENV_NAMES = frozenset(
     {
         "PATH", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "LC_CTYPE", "TERM",
         "COLORTERM", "NO_COLOR", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+    }
+)
+# Variables Windows programs (Python, Node, PowerShell, Git) need to start at all. They locate the
+# OS and machine, never the user's profile or credentials; the profile roots are re-pointed into
+# the isolated HOME by windows_isolated_home().
+WINDOWS_SYSTEM_ENV_NAMES = frozenset(
+    {
+        "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "SYSTEMDRIVE", "PROGRAMDATA",
+        "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432", "COMMONPROGRAMFILES",
+        "COMMONPROGRAMFILES(X86)", "COMMONPROGRAMW6432", "NUMBER_OF_PROCESSORS",
+        "PROCESSOR_ARCHITECTURE", "PROCESSOR_IDENTIFIER", "PROCESSOR_LEVEL",
+        "PROCESSOR_REVISION", "OS", "PSMODULEPATH", "ALLUSERSPROFILE", "PUBLIC",
+        "DRIVERDATA", "COMPUTERNAME",
     }
 )
 MAX_GO_DURATION_NANOSECONDS = 1 << 63
@@ -111,6 +142,17 @@ SKILL_DISCOVERY_PATHS = {
     "codex": Path(".agents/skills/pairmux"),
 }
 TERMINAL_HARNESSES = ("pmx-cli", "rawtmux", "shell")
+RAWTMUX_WINDOWS_ERROR = (
+    "--terminal-harness rawtmux is unavailable on Windows: rawtmux is a raw-tmux comparison "
+    "baseline, and tmux does not run on Windows (pmx-cli and shell are supported)"
+)
+# Files that drive an episode but never enter the agent worktree.
+CONTROL_FILE_NAMES = frozenset(
+    {"TASK.md", "setup.py", "check.py", "golden.py", "human.py", "env.sh",
+     # Retired POSIX control scripts, excluded defensively from stale checkouts.
+     "setup.sh", "check.sh", "golden.sh", "human.sh"}
+)
+CONTROL_SUPPORT_FILES = ("evallib.py", "termsupport.py")
 HARNESS_NOTES_SOURCE = EVALS_DIR / "harness" / "TERMINAL-HOWTO.md"
 HARNESS_NOTES_NAME = "TERMINAL-HOWTO.md"
 RAWTMUX_TASK_SUFFIX = (
@@ -121,6 +163,7 @@ RAWTMUX_TASK_SUFFIX = (
 # still occupies the proxy PATH slot so a host-installed pairmux cannot leak
 # into the episode; attempted invocations surface in the agent transcript.
 PAIRMUX_STUB = "#!/bin/sh\necho \"pairmux: command not found\" >&2\nexit 127\n"
+PAIRMUX_STUB_CMD = "@echo pairmux: command not found 1>&2\r\n@exit /b 127\r\n"
 
 
 class EpisodeFailureError(RuntimeError):
@@ -243,6 +286,8 @@ GENERATED_NAMES = {
     "sidework-a.txt",
     "sidework-b.txt",
     "migration-done.txt",
+    # Copied in by setup from the trusted evals tree; a stale manual copy never leaks.
+    "termsupport.py",
 }
 
 
@@ -417,7 +462,7 @@ def endpoint_options(args: argparse.Namespace) -> EndpointOptions | None:
 def terminal_harness_policy(harness: str) -> dict[str, str]:
     return {
         "schema": "pairmux.eval.terminal-policy.v1",
-        "host_tmux": "available",
+        "host_tmux": "unavailable" if IS_WINDOWS else "available",
         "pairmux": "available" if harness == "pmx-cli" else "hidden",
         "skill": "available" if harness == "pmx-cli" else "hidden",
     }
@@ -431,7 +476,7 @@ def discover_scenarios() -> dict[tuple[str, int], str]:
         match = re.fullmatch(r"([SM])(\d+)", path.name)
         if not path.is_dir() or not match:
             continue
-        required = (path / "TASK.md", path / "setup.sh", path / "check.sh")
+        required = (path / "TASK.md", path / "setup.py", path / "check.py")
         if all(item.is_file() for item in required):
             found[(match.group(1), int(match.group(2)))] = path.name
     return found
@@ -478,6 +523,14 @@ def parse_scenarios(
     return ordered
 
 
+def agent_command(executable: str) -> list[str]:
+    """argv prefix for an agent CLI. Windows resolves npm .cmd shims to `node <entry.js>`
+    because cmd.exe cannot carry the multi-line task argument."""
+    if IS_WINDOWS:
+        return winsupport.resolve_agent_executable(executable)
+    return [executable]
+
+
 def build_agent_argv(
     agent: str,
     executable: str,
@@ -491,7 +544,7 @@ def build_agent_argv(
 ) -> list[str]:
     if agent == "opencode":
         argv = [
-            executable,
+            *agent_command(executable),
             "--pure",
             "--auto",
             "--print-logs",
@@ -509,7 +562,7 @@ def build_agent_argv(
         return argv
     if agent == "claude":
         argv = [
-            executable,
+            *agent_command(executable),
             "-p",
             "--allowedTools",
             "Bash",
@@ -531,7 +584,7 @@ def build_agent_argv(
         return argv
     if agent == "codex":
         argv = [
-            executable,
+            *agent_command(executable),
             "exec",
             "--sandbox",
             codex_sandbox,
@@ -551,6 +604,9 @@ def build_agent_argv(
 
 
 def process_group_exists(process_group: int) -> bool:
+    if IS_WINDOWS:
+        job = _WINDOWS_JOBS.get(process_group)
+        return job.active_processes() > 0 if job is not None else winsupport.pid_alive(process_group)
     try:
         os.killpg(process_group, 0)
     except ProcessLookupError:
@@ -564,6 +620,8 @@ def parent_process_id(process_id: int) -> int | None:
     """Read a live process's parent without trusting agent-provided evidence."""
     if process_id <= 1:
         return None
+    if IS_WINDOWS:
+        return winsupport.parent_process_id(process_id)
     if sys.platform.startswith("linux"):
         try:
             stat = Path(f"/proc/{process_id}/stat").read_text(encoding="utf-8")
@@ -611,9 +669,69 @@ def process_descends_from(process_id: int, ancestor_id: int, max_depth: int = 12
     return False
 
 
+# Windows stand-in for process groups: every launched process tree lives in its own Job Object.
+_WINDOWS_JOBS: dict[int, "winsupport.Job"] = {}
+
+
+def launch_options() -> dict[str, object]:
+    """Popen options that give a child its own process group (session) to terminate later."""
+    if IS_WINDOWS:
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
+
+def adopt_process(process: subprocess.Popen[bytes]) -> subprocess.Popen[bytes]:
+    """Record a just-launched child's tree for terminate_process_group (Windows: a Job Object)."""
+    if IS_WINDOWS:
+        try:
+            job = winsupport.Job()
+        except OSError:
+            return process
+        if job.assign(process):
+            _WINDOWS_JOBS[process.pid] = job
+        else:
+            job.close()
+    return process
+
+
+def release_process(process: subprocess.Popen[bytes]) -> None:
+    """Forget a child's tree handle without terminating it (no-op on POSIX)."""
+    job = _WINDOWS_JOBS.pop(process.pid, None)
+    if job is not None:
+        job.close()
+
+
+def _terminate_windows_tree(process: subprocess.Popen[bytes], grace_seconds: float) -> int | None:
+    job = _WINDOWS_JOBS.pop(process.pid, None)
+    try:
+        if job is not None:
+            if job.active_processes() == 0:
+                return None
+            job.terminate(1)
+        elif process.poll() is not None:
+            return None
+        else:
+            winsupport.taskkill_tree(process.pid)
+        try:
+            process.wait(timeout=grace_seconds)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            try:
+                process.wait(timeout=grace_seconds)
+            except subprocess.TimeoutExpired:
+                pass
+            return SIGKILL
+        return signal.SIGTERM
+    finally:
+        if job is not None:
+            job.close()
+
+
 def terminate_process_group(
     process: subprocess.Popen[bytes], grace_seconds: float = 2.0
 ) -> int | None:
+    if IS_WINDOWS:
+        return _terminate_windows_tree(process, grace_seconds)
     if os.name == "posix":
         if not process_group_exists(process.pid):
             return None
@@ -625,10 +743,10 @@ def terminate_process_group(
         if process.poll() is not None:
             return None
         process.terminate()
-    deadline = time.monotonic() + grace_seconds
-    while time.monotonic() < deadline:
+    deadline = monotonic() + grace_seconds
+    while monotonic() < deadline:
         try:
-            process.wait(timeout=min(0.05, max(0.001, deadline - time.monotonic())))
+            process.wait(timeout=min(0.05, max(0.001, deadline - monotonic())))
         except subprocess.TimeoutExpired:
             pass
         if os.name == "posix":
@@ -638,7 +756,7 @@ def terminate_process_group(
             return signal.SIGTERM
     if os.name == "posix":
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            os.killpg(process.pid, SIGKILL)
         except ProcessLookupError:
             return signal.SIGTERM
     else:
@@ -647,7 +765,7 @@ def terminate_process_group(
         process.wait(timeout=grace_seconds)
     except subprocess.TimeoutExpired:
         pass
-    return signal.SIGKILL
+    return SIGKILL
 
 
 def opencode_provider_failure(stderr_tail: str) -> str | None:
@@ -826,7 +944,7 @@ def run_process(
     early_stdout_failure_detector: Callable[[object], str | None] | None = None,
 ) -> ProcessResult:
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
-    started = time.monotonic()
+    started = monotonic()
     with stdout_path.open("wb") as stdout_stream:
         stderr_stream = None
         if not merge_stderr and stderr_path is not None:
@@ -834,21 +952,21 @@ def run_process(
         process: subprocess.Popen[bytes] | None = None
         try:
             try:
-                process = subprocess.Popen(
+                process = adopt_process(subprocess.Popen(
                     argv,
                     cwd=cwd,
                     env=env,
                     stdin=subprocess.DEVNULL,
                     stdout=stdout_stream,
                     stderr=subprocess.STDOUT if merge_stderr else stderr_stream,
-                    start_new_session=(os.name == "posix"),
-                    pass_fds=pass_fds,
-                )
+                    **launch_options(),
+                    **({"pass_fds": pass_fds} if pass_fds else {}),
+                ))
             except OSError as error:
                 message = f"{type(error).__name__}: {error}"
                 if stderr_stream is not None:
                     stderr_stream.write((message + "\n").encode())
-                return ProcessResult(None, False, round(time.monotonic() - started, 6), message)
+                return ProcessResult(None, False, round(monotonic() - started, 6), message)
             stderr_offset = 0
             stderr_tail = ""
             stdout_offset = 0
@@ -902,7 +1020,7 @@ def run_process(
                     return ProcessResult(
                         process.poll(),
                         False,
-                        round(time.monotonic() - started, 6),
+                        round(monotonic() - started, 6),
                         termination_signal=termination_signal,
                         observed_failure_class=detected,
                     )
@@ -914,12 +1032,12 @@ def run_process(
                     return ProcessResult(
                         returncode,
                         False,
-                        round(time.monotonic() - started, 6),
+                        round(monotonic() - started, 6),
                         termination_signal=cleanup_signal,
                         observed_failure_class=detected,
                     )
 
-                remaining = deadline - time.monotonic()
+                remaining = deadline - monotonic()
                 if remaining <= 0:
                     detected = observed_failure()
                     if detected is not None:
@@ -927,7 +1045,7 @@ def run_process(
                         return ProcessResult(
                             process.poll(),
                             False,
-                            round(time.monotonic() - started, 6),
+                            round(monotonic() - started, 6),
                             termination_signal=termination_signal,
                             observed_failure_class=detected,
                         )
@@ -940,7 +1058,7 @@ def run_process(
                         return ProcessResult(
                             returncode,
                             False,
-                            round(time.monotonic() - started, 6),
+                            round(monotonic() - started, 6),
                             termination_signal=cleanup_signal,
                             observed_failure_class=detected,
                         )
@@ -949,7 +1067,7 @@ def run_process(
                     return ProcessResult(
                         process.poll(),
                         True,
-                        round(time.monotonic() - started, 6),
+                        round(monotonic() - started, 6),
                         termination_signal=termination_signal,
                         timeout_inflight_call_ids=tuple(inflight),
                     )
@@ -963,7 +1081,7 @@ def run_process(
                 return ProcessResult(
                     returncode,
                     False,
-                    round(time.monotonic() - started, 6),
+                    round(monotonic() - started, 6),
                     termination_signal=cleanup_signal,
                     observed_failure_class=detected,
                 )
@@ -972,6 +1090,8 @@ def run_process(
                 if process is not None and sys.exc_info()[1] is not None:
                     terminate_process_group(process)
             finally:
+                if process is not None:
+                    release_process(process)
                 if stderr_stream is not None:
                     stderr_stream.close()
 
@@ -991,8 +1111,12 @@ def isolated_version_probe_env(
         "NO_COLOR",
         "PAIRMUX_MOCK_VERSION_LOG",
     }
-    clean = {name: value for name, value in source.items() if name in allowed}
+    clean = {
+        name: value for name, value in source.items()
+        if name in allowed or (IS_WINDOWS and name.upper() in WINDOWS_SYSTEM_ENV_NAMES)
+    }
     clean["HOME"] = str(isolated_home)
+    clean.update(windows_isolated_home(isolated_home))
     clean["XDG_CONFIG_HOME"] = str(isolated_home / ".config")
     clean["XDG_CACHE_HOME"] = str(isolated_home / ".cache")
     clean["XDG_DATA_HOME"] = str(isolated_home / ".local/share")
@@ -1016,28 +1140,56 @@ def isolated_version_probe_env(
     return clean
 
 
+def host_home_directory() -> Path:
+    """The host user's home, whose skills must never leak into an isolated agent.
+
+    POSIX: HOME. Windows: the profile (USERPROFILE), else HOME. Path.home() raises on Windows
+    when USERPROFILE/HOMEPATH are absent (a sealed environment), so HOME is consulted first."""
+    if IS_WINDOWS:
+        for name in ("USERPROFILE", "HOME"):
+            value = os.environ.get(name)
+            if value:
+                return Path(value)
+        return Path.home()
+    return Path(os.environ.get("HOME", "~")).expanduser()
+
+
+def windows_isolated_home(isolated_home: Path) -> dict[str, str]:
+    """On Windows, programs find the profile through USERPROFILE/APPDATA/LOCALAPPDATA, not HOME:
+    point all of them into the isolated HOME (HOMEDRIVE/HOMEPATH are never copied)."""
+    if not IS_WINDOWS:
+        return {}
+    roaming = isolated_home / "AppData" / "Roaming"
+    local = isolated_home / "AppData" / "Local"
+    for directory in (roaming, local):
+        directory.mkdir(parents=True, exist_ok=True)
+    return {"USERPROFILE": str(isolated_home), "APPDATA": str(roaming), "LOCALAPPDATA": str(local)}
+
+
 def probe_version(executable: str, *, env: dict[str, str], cwd: Path) -> str:
-    process = subprocess.Popen(
-        [executable, "--version"],
+    process = adopt_process(subprocess.Popen(
+        [*agent_command(executable), "--version"],
         cwd=cwd,
         env=env,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        start_new_session=(os.name == "posix"),
-    )
+        **launch_options(),
+    ))
     try:
         output, _ = process.communicate(timeout=10)
     except subprocess.TimeoutExpired:
         terminate_process_group(process)
         return "unknown (version probe timed out)"
+    finally:
+        release_process(process)
     text = output.decode(errors="replace").strip()
     first_line = text.splitlines()[0] if text else "unknown"
     if process.returncode != 0:
         return f"unknown (version probe exit {process.returncode}: {first_line})"
     # Codex can emit a warning before its version. Do not record the warning as
     # provenance, and do not treat arbitrary prose mentioning a version as one.
-    if Path(executable).name == "codex":
+    if Path(executable).stem.lower() == "codex":
         versions = [
             line.strip() for line in text.splitlines()
             if re.fullmatch(r"codex-cli\s+\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", line.strip())
@@ -1050,18 +1202,14 @@ def probe_version(executable: str, *, env: dict[str, str], cwd: Path) -> str:
 def resolve_pairmux(explicit: Path | None = None) -> str | None:
     if explicit is not None:
         candidate = explicit.expanduser().resolve()
-        if not candidate.is_file() or not os.access(candidate, os.X_OK):
+        if not evallib.is_executable(candidate):
             raise ValueError(f"--pairmux-bin is not executable: {candidate}")
         return str(candidate)
-    repository = EVALS_DIR.parent
-    for candidate in (
-        repository.parent / "pairmux" / "bin" / "pairmux",
-        repository.parent.parent / "pairmux" / "bin" / "pairmux",
-    ):
-        if candidate.is_file() and os.access(candidate, os.X_OK):
+    for candidate in evallib.sibling_pairmux_candidates(EVALS_DIR):
+        if evallib.is_executable(candidate):
             return str(candidate.resolve())
     configured = os.environ.get("PAIRMUX_REAL_BIN")
-    if configured and os.access(configured, os.X_OK):
+    if configured and evallib.is_executable(configured):
         return str(Path(configured).expanduser().resolve())
     discovered = shutil.which("pairmux")
     if discovered:
@@ -1110,7 +1258,8 @@ def git_provenance(root: Path = EVALS_DIR.parent) -> dict[str, object]:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
         )
 
@@ -1172,7 +1321,8 @@ def load_opencode_api_auth(path: Path, provider: str) -> dict[str, object]:
             raise ValueError("--opencode-auth-file must be a regular file")
         if hasattr(os, "geteuid") and metadata.st_uid != os.geteuid():
             raise ValueError("--opencode-auth-file must be owned by the current user")
-        if stat.S_IMODE(metadata.st_mode) & 0o077:
+        # Windows protects files with ACLs, not mode bits (st_mode is always 0o666/0o444).
+        if not IS_WINDOWS and stat.S_IMODE(metadata.st_mode) & 0o077:
             raise ValueError("--opencode-auth-file permissions must be 0600 or stricter")
         if metadata.st_size > OPENCODE_AUTH_MAX_BYTES:
             raise ValueError("--opencode-auth-file exceeds the 1 MiB safety limit")
@@ -1223,7 +1373,8 @@ def run_discovery_command(
     if endpoint is None:
         completed = subprocess.run(
             argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=timeout,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, encoding="utf-8", errors="replace",
+            timeout=timeout,
         )
         evidence_path.write_text(completed.stdout, encoding="utf-8")
         return completed
@@ -1319,7 +1470,8 @@ def codex_discovery_skill_paths(output: str, isolated_home: Path) -> dict[str, P
                 if match is None:
                     continue
                 name, reference = match.groups()
-                if reference.startswith("/"):
+                if reference.startswith("/") or Path(reference).is_absolute():
+                    # Legacy full paths: POSIX, or a drive-qualified Windows path.
                     path = Path(reference).resolve()
                 else:
                     components = reference.split("/")
@@ -1363,16 +1515,16 @@ def verify_skill_discovery(
         evidence_path.write_text("mock discovery contract; path/hash checked by mock agent\n", encoding="utf-8")
         return {"verified": True, "method": "model-free-mock-contract", "path": str(expected)}
     if agent == "opencode":
-        argv = [executable, "--pure", "debug", "skill"]
+        argv = [*agent_command(executable), "--pure", "debug", "skill"]
         method = "opencode-debug-skill"
     elif agent == "codex":
-        argv = [executable, "debug", "prompt-input", "pairmux-eval-discovery"]
+        argv = [*agent_command(executable), "debug", "prompt-input", "pairmux-eval-discovery"]
         method = "codex-debug-prompt-input"
     else:
         if not claude_sentinel_token:
             raise RuntimeError("Claude discovery sentinel was not installed")
         argv = [
-            executable,
+            *agent_command(executable),
             "-p",
             "--setting-sources",
             "project",
@@ -1419,6 +1571,10 @@ def verify_skill_discovery(
     host_prefix = str(host_home.expanduser().resolve()) + os.sep
     isolated_prefix = str(Path(env["HOME"]).resolve()) + os.sep
     absolute_skills = re.findall(r"(?:file:\s*)?(/[^\s\"'<>]+/SKILL\.md)", completed.stdout)
+    if IS_WINDOWS:
+        absolute_skills += re.findall(
+            r"(?:file:\s*)?([A-Za-z]:[\\/][^\s\"'<>]+[\\/]SKILL\.md)", completed.stdout
+        )
     leaked = [
         path
         for path in absolute_skills
@@ -1455,14 +1611,15 @@ def seed_opencode_models_cache(clean_env: dict[str, str]) -> dict[str, object]:
     return record
 
 
-def pairmux_state_namespace(state_root: Path, socket_name: str, tmux_tmpdir: str) -> Path:
-    root = os.path.normpath(os.path.abspath(tmux_tmpdir or "/tmp"))
-    if os.path.exists(root):
-        root = os.path.realpath(root)
-    socket_name = socket_name or "pairmux"
-    identity = os.path.join(root, f"tmux-{os.getuid()}", socket_name)
-    endpoint_hash = hashlib.sha256(identity.encode()).hexdigest()
-    return state_root / ".sockets" / endpoint_hash
+def pairmux_state_namespace(
+    state_root: Path, socket_name: str, tmux_tmpdir: str, env: dict[str, str] | None = None
+) -> Path:
+    """pairmux's state namespace for the endpoint the episode's pairmux will choose (tmux, or
+    the built-in server always used on Windows); shared with the scenario scripts via evallib."""
+    probe = dict(os.environ if env is None else env)
+    if not IS_WINDOWS:
+        probe["TMUX_TMPDIR"] = tmux_tmpdir or "/tmp"
+    return evallib.state_namespace(state_root, socket_name, probe)
 
 
 def install_isolated_skill(
@@ -1533,10 +1690,12 @@ def isolated_agent_env(
     clean = {
         name: value
         for name, value in source.items()
-        if (name in exact or name.startswith("PAIRMUX_MOCK_"))
+        if (name in exact or name.startswith("PAIRMUX_MOCK_")
+            or (IS_WINDOWS and name.upper() in WINDOWS_SYSTEM_ENV_NAMES))
         and (endpoint is None or name != endpoint.key_env)
     }
     clean["HOME"] = str(isolated_home)
+    clean.update(windows_isolated_home(isolated_home))
     clean["XDG_CONFIG_HOME"] = str(isolated_home / ".config")
     clean["XDG_CACHE_HOME"] = str(isolated_home / ".cache")
     clean["XDG_DATA_HOME"] = str(isolated_home / ".local/share")
@@ -1694,7 +1853,8 @@ def prepare_agent_project_isolation(
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=10,
             )
         except (OSError, subprocess.TimeoutExpired) as error:
@@ -1763,23 +1923,30 @@ def verify_hashes(expected: dict[Path, str]) -> None:
 
 
 def copy_fixture_worktree(scenario: str, work_root: Path) -> Path:
-    """Copy only agent-facing fixtures; runner scripts stay outside the worktree."""
+    """Copy only this platform's agent-facing fixtures; runner scripts stay outside the worktree.
+
+    On Windows the worktree drops POSIX shell fixtures (*.sh) and gains the scenario's windows/
+    overlay (Windows twins, never its TASK.md); POSIX never copies the overlay."""
     source = SCENARIOS_DIR / scenario
     destination = work_root / scenario
     destination.mkdir(parents=True)
-    # golden.sh (reference solution) and human.sh (M03's scripted human) are
-    # control-plane files the agent must never see.
-    excluded = {"TASK.md", "setup.sh", "check.sh", "env.sh", "golden.sh", "human.sh"}
+    # golden.py (reference solution) and human.py (scripted humans) are control-plane files the
+    # agent must never see; neither are setup/check, the task, or the runner env file.
     for path in source.iterdir():
-        if path.name in excluded or path.name in GENERATED_NAMES or path.name.startswith("transcript"):
+        if path.name in CONTROL_FILE_NAMES or path.name in GENERATED_NAMES or path.name.startswith("transcript"):
             continue
-        if path.name in {"state", "__pycache__", ".p", ".ps", ".pairmux-state", ".pairmux-tmp"}:
+        if path.name in {"state", "__pycache__", ".p", ".ps", ".pairmux-state", ".pairmux-tmp",
+                         evallib.WINDOWS_OVERLAY}:
+            continue
+        if IS_WINDOWS and path.is_file() and path.suffix == ".sh":
             continue
         target = destination / path.name
         if path.is_dir():
             shutil.copytree(path, target)
         elif path.is_file():
             shutil.copy2(path, target)
+    for path in evallib.overlay_files(source):
+        shutil.copy2(path, destination / path.name)
     return destination
 
 
@@ -1788,14 +1955,19 @@ def prepare_control_sources(scenario: str, control_root: Path) -> tuple[Path, di
     destination = control_root / "evals" / "scenarios" / scenario
     destination.mkdir(parents=True)
     files = {
-        EVALS_DIR / "lib.sh": control_root / "evals" / "lib.sh",
-        source_dir / "setup.sh": destination / "setup.sh",
-        source_dir / "check.sh": destination / "check.sh",
-        source_dir / "TASK.md": destination / "TASK.md",
+        EVALS_DIR / name: control_root / "evals" / name for name in CONTROL_SUPPORT_FILES
     }
-    # Optional control-plane companions (M03's scripted human, reference
-    # solutions). They live beside setup.sh, never in the agent worktree.
-    for name in ("human.sh", "golden.sh"):
+    files.update(
+        {
+            source_dir / "setup.py": destination / "setup.py",
+            source_dir / "check.py": destination / "check.py",
+            # This platform's task wording (windows/TASK.md when present on Windows).
+            evallib.task_path(source_dir): destination / "TASK.md",
+        }
+    )
+    # Optional control-plane companions (scripted humans, reference solutions). They live
+    # beside setup.py, never in the agent worktree.
+    for name in ("human.py", "golden.py"):
         optional = source_dir / name
         if optional.is_file():
             files[optional] = destination / name
@@ -1806,34 +1978,78 @@ def prepare_control_sources(scenario: str, control_root: Path) -> tuple[Path, di
     return destination, expected
 
 
+def private_temp_root(prefix: str) -> Path:
+    """A private (0700) per-episode directory. POSIX keeps /tmp for short AF_UNIX socket paths
+    (macOS sockaddr_un is 104 bytes); Windows uses its per-user TEMP."""
+    root = Path(tempfile.mkdtemp(prefix=prefix, dir=None if IS_WINDOWS else "/tmp")).resolve()
+    root.chmod(0o700)
+    return root
+
+
 def install_shell_path_guard(runtime_root: Path, proxy_dir: Path) -> dict[str, str]:
-    """Keep the proxy first even when an agent tool starts a login shell."""
+    """Keep the proxy first even when an agent tool starts a login shell (bash/zsh, and Git Bash
+    on Windows, whose PATH is POSIX-spelled)."""
     runtime_root.mkdir(parents=True, exist_ok=True)
-    export = f"export PATH={shlex.quote(str(proxy_dir))}:\"$PATH\"\n"
+    proxy_path = winsupport.posix_path(proxy_dir) if IS_WINDOWS else str(proxy_dir)
+    export = f"export PATH={shlex.quote(proxy_path)}:\"$PATH\"\n"
     # Bash performs command substitution while expanding the BASH_ENV *path*.
     # Keep activation paths outside user-controlled output roots and restrict
     # their names to tempfile's safe alphabet. A copy remains in the artifact.
     (runtime_root / "shell-env.sh").write_text(export, encoding="utf-8")
-    activation_root = Path(tempfile.mkdtemp(prefix="pairmux-eval-shell-", dir="/tmp"))
-    activation_root.chmod(0o700)
+    activation_root = private_temp_root("pairmux-eval-shell-")
     shell_init = activation_root / "shell-env.sh"
-    shell_init.write_text(export, encoding="utf-8")
+    with open(shell_init, "w", encoding="utf-8", newline="\n") as stream:
+        stream.write(export)
     zdotdir = activation_root / "zdotdir"
     zdotdir.mkdir(exist_ok=True)
     for name in (".zshenv", ".zprofile", ".zshrc", ".zlogin"):
-        (zdotdir / name).write_text(export, encoding="utf-8")
-    return {
-        "BASH_ENV": str(shell_init),
-        "ENV": str(shell_init),
-        "ZDOTDIR": str(zdotdir),
-    }
+        with open(zdotdir / name, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(export)
+    spell = winsupport.posix_path if IS_WINDOWS else str
+    guard = {"BASH_ENV": spell(shell_init), "ENV": spell(shell_init), "ZDOTDIR": spell(zdotdir)}
+    _SHELL_GUARD_DIRS[guard["BASH_ENV"]] = activation_root
+    return guard
+
+
+# BASH_ENV value -> its removable activation directory in this platform's own path spelling.
+_SHELL_GUARD_DIRS: dict[str, Path] = {}
+
+
+def remove_shell_path_guard(guard: dict[str, str]) -> None:
+    root = _SHELL_GUARD_DIRS.pop(guard["BASH_ENV"], Path(guard["BASH_ENV"]).parent)
+    shutil.rmtree(root, ignore_errors=True)
+
+
+def install_pairmux_proxy(proxy_dir: Path, harness: str) -> tuple[Path, str]:
+    """Put the runner's pairmux front on PATH. Returns (path, method).
+
+    POSIX: the proxy script itself (or the command-not-found stub for baselines). Windows: a real
+    console launcher `pairmux.exe` that runs the proxy with exact argv (cmd.exe quoting would
+    corrupt arguments); baselines get `pairmux.cmd` plus an extensionless sh stub for Git Bash."""
+    if not IS_WINDOWS:
+        proxy_path = proxy_dir / "pairmux"
+        if harness == "pmx-cli":
+            shutil.copy2(PROXY_SOURCE, proxy_path)
+        else:
+            proxy_path.write_text(PAIRMUX_STUB, encoding="utf-8")
+        proxy_path.chmod(0o555)
+        return proxy_path, "posix-script"
+    if harness == "pmx-cli":
+        return winsupport.make_console_launcher(PROXY_SOURCE, proxy_dir, "pairmux")
+    stub = proxy_dir / "pairmux.cmd"
+    stub.write_text(PAIRMUX_STUB_CMD, encoding="utf-8")
+    with open(proxy_dir / "pairmux", "w", encoding="utf-8", newline="\n") as stream:
+        stream.write(PAIRMUX_STUB)
+    return stub, "windows-command-not-found-stub"
 
 
 def copy_scenario(scenario: str, work_root: Path) -> Path:
+    """A self-contained copy of one scenario (control scripts included) for manual-style tests."""
     evals_copy = work_root / "evals"
     scenario_copy = evals_copy / "scenarios" / scenario
     evals_copy.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(EVALS_DIR / "lib.sh", evals_copy / "lib.sh")
+    for name in CONTROL_SUPPORT_FILES:
+        shutil.copy2(EVALS_DIR / name, evals_copy / name)
 
     def ignore(_directory: str, names: list[str]) -> set[str]:
         ignored = {name for name in names if name in GENERATED_NAMES or name.startswith("transcript")}
@@ -1893,9 +2109,12 @@ class PairmuxBroker:
         expected_socket: str,
         max_requests: int = 256,
     ) -> None:
-        if os.name != "posix" or not hasattr(socket, "SCM_RIGHTS"):
+        if not IS_WINDOWS and (os.name != "posix" or not hasattr(socket, "SCM_RIGHTS")):
             raise RuntimeError("pairmux eval broker requires Unix descriptor passing")
+        # POSIX: socket_path is the AF_UNIX socket. Windows: it is a file holding the random
+        # named-pipe address, read by the proxy exactly where it would find broker.sock.
         self.socket_path = socket_path
+        self.pipe_address: str | None = None
         self.real_pairmux = real_pairmux.resolve()
         self.real_pairmux_sha256 = real_pairmux_sha256
         self.fixed_env = fixed_env.copy()
@@ -1919,6 +2138,17 @@ class PairmuxBroker:
             raise RuntimeError("pairmux eval broker already started")
         if self.socket_path.exists():
             raise RuntimeError(f"pairmux eval broker socket already exists: {self.socket_path}")
+        if IS_WINDOWS:
+            from multiprocessing.connection import Listener
+
+            self.pipe_address = r"\\.\pipe\pairmux-eval-" + uuid.uuid4().hex
+            self._listener = Listener(self.pipe_address, family="AF_PIPE")
+            self.socket_path.write_text(self.pipe_address + "\n", encoding="utf-8")
+            self._listener_thread = threading.Thread(
+                target=self._accept_loop, name="pairmux-eval-broker", daemon=True
+            )
+            self._listener_thread.start()
+            return
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         listener.bind(str(self.socket_path))
         os.chmod(self.socket_path, 0o600)
@@ -1940,7 +2170,13 @@ class PairmuxBroker:
         assert self._listener is not None
         while not self._closing.is_set():
             try:
-                connection, _address = self._listener.accept()
+                if IS_WINDOWS:
+                    connection = self._listener.accept()
+                    if self._closing.is_set():
+                        connection.close()  # the finalizer's wake-up connection
+                        break
+                else:
+                    connection, _address = self._listener.accept()
             except socket.timeout:
                 continue
             except OSError as error:
@@ -1958,7 +2194,14 @@ class PairmuxBroker:
             handler.start()
 
     @staticmethod
-    def _peer_credentials(connection: socket.socket) -> tuple[int, int]:
+    def _peer_credentials(connection: socket.socket) -> tuple[int, int | str]:
+        if IS_WINDOWS:
+            # Kernel-reported client of this pipe instance, and its token's user SID.
+            peer_pid = winsupport.pipe_client_pid(int(connection._handle))
+            peer_sid = winsupport.process_user_sid(peer_pid)
+            if peer_sid is None:
+                raise ValueError("broker cannot read the peer process owner")
+            return peer_pid, peer_sid
         if sys.platform.startswith("linux") and hasattr(socket, "SO_PEERCRED"):
             raw = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
             peer_pid, peer_uid, _peer_gid = struct.unpack("=3i", raw)
@@ -1983,12 +2226,48 @@ class PairmuxBroker:
         return json.loads(encoded, object_pairs_hook=reject_duplicates)
 
     @staticmethod
-    def _close_descriptors(descriptors: list[int]) -> None:
+    def _close_descriptors(descriptors: list[int | None]) -> None:
         for descriptor in descriptors:
+            if descriptor is None:
+                continue
             try:
                 os.close(descriptor)
             except OSError:
                 pass
+
+    def _validated_payload(self, encoded: bytes) -> dict[str, object]:
+        payload = self._json_without_duplicate_keys(encoded)
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"schema", "argv", "cwd"}
+            or payload.get("schema") != BROKER_REQUEST_SCHEMA
+            or not isinstance(payload.get("argv"), list)
+            or not all(isinstance(value, str) for value in payload["argv"])
+            or not isinstance(payload.get("cwd"), str)
+        ):
+            raise ValueError("broker request does not match the exact execution schema")
+        if any("\0" in value for value in [*payload["argv"], payload["cwd"]]):
+            raise ValueError("broker request contains a NUL byte")
+        return payload
+
+    def _recv_request_windows(
+        self, connection: object, peer_pid: int
+    ) -> tuple[dict[str, object], list[int | None]]:
+        """Named-pipe request: the JSON payload, then the client's three std handle values,
+        duplicated here out of the kernel-identified client (the SCM_RIGHTS analogue)."""
+        deadline = monotonic() + 5.0
+
+        def receive(limit: int) -> bytes:
+            if not connection.poll(max(0.0, deadline - monotonic())):
+                raise ValueError("timed out waiting for the broker request")
+            return connection.recv_bytes(limit)
+
+        payload = self._validated_payload(receive(BROKER_MAX_FRAME_BYTES))
+        raw_handles = receive(64)
+        if len(raw_handles) != 24:
+            raise ValueError("broker request must pass stdin, stdout, and stderr")
+        handles = list(struct.unpack("<3Q", raw_handles))
+        return payload, winsupport.duplicate_client_handles(peer_pid, handles)
 
     def _recv_request(
         self, connection: socket.socket
@@ -2072,6 +2351,12 @@ class PairmuxBroker:
     def _send_result(
         connection: socket.socket, returncode: int, error: str | None = None
     ) -> None:
+        if IS_WINDOWS:
+            connection.send_bytes(json.dumps(
+                {"schema": BROKER_RESPONSE_SCHEMA, "returncode": returncode, "error": error},
+                ensure_ascii=True, separators=(",", ":"), sort_keys=True,
+            ).encode())
+            return
         encoded = json.dumps(
             {
                 "schema": BROKER_RESPONSE_SCHEMA,
@@ -2084,11 +2369,29 @@ class PairmuxBroker:
         ).encode()
         connection.sendall(struct.pack("!I", len(encoded)) + encoded)
 
+    @staticmethod
+    def _wait_client_event(execution: BrokerExecution) -> bytes | None:
+        """Windows: poll the pipe until the client sends data or goes away (None = finished)."""
+        connection = execution.connection
+        while not execution.done.is_set():
+            try:
+                if connection.poll(0):
+                    return connection.recv_bytes(BROKER_MAX_FRAME_BYTES) or b"?"
+            except (EOFError, OSError):
+                return b""
+            execution.done.wait(0.05)
+        return None
+
     def _monitor_client(self, execution: BrokerExecution) -> None:
-        try:
-            unexpected = execution.connection.recv(1)
-        except OSError:
-            unexpected = b""
+        if IS_WINDOWS:
+            unexpected = self._wait_client_event(execution)
+            if unexpected is None:
+                return
+        else:
+            try:
+                unexpected = execution.connection.recv(1)
+            except OSError:
+                unexpected = b""
         if execution.done.is_set():
             return
         with self._lock:
@@ -2109,6 +2412,14 @@ class PairmuxBroker:
     def _signal_child(process: subprocess.Popen[bytes], signum: int) -> None:
         if process.poll() is not None:
             return
+        if IS_WINDOWS:
+            # TerminateProcess on the pairmux CLI only (never a job): a built-in server it
+            # started must outlive the call, as setsid'd daemons outlive killpg on POSIX.
+            try:
+                process.terminate()
+            except OSError:
+                pass
+            return
         try:
             os.killpg(process.pid, signum)
         except ProcessLookupError:
@@ -2124,22 +2435,26 @@ class PairmuxBroker:
         record.update(
             {
                 "finished_at": utc_now(),
-                "duration_seconds": round(time.monotonic() - started_monotonic, 6),
+                "duration_seconds": round(monotonic() - started_monotonic, 6),
                 "exit_code": returncode,
             }
         )
 
     def _handle_connection(self, connection: socket.socket) -> None:
-        descriptors: list[int] = []
+        descriptors: list[int | None] = []
         execution: BrokerExecution | None = None
         peer_pid: int | None = None
-        peer_uid: int | None = None
+        peer_uid: int | str | None = None
         request: dict[str, object] | None = None
         try:
             peer_pid, peer_uid = self._peer_credentials(connection)
-            if peer_uid != os.geteuid():
+            runner_uid = winsupport.process_user_sid() if IS_WINDOWS else os.geteuid()
+            if peer_uid != runner_uid:
                 raise ValueError(f"broker peer uid {peer_uid} does not match runner uid")
-            request, descriptors = self._recv_request(connection)
+            if IS_WINDOWS:
+                request, descriptors = self._recv_request_windows(connection, peer_pid)
+            else:
+                request, descriptors = self._recv_request(connection)
             with self._lock:
                 if self._request_count >= self.max_requests:
                     raise ValueError("broker request limit exceeded")
@@ -2148,15 +2463,21 @@ class PairmuxBroker:
             self._validate_socket_override(argv)
             if sha256_file(self.real_pairmux) != self.real_pairmux_sha256:
                 raise RuntimeError("broker real pairmux hash changed before execution")
-            try:
-                client_process_group = os.getpgid(peer_pid)
-            except (ProcessLookupError, PermissionError):
-                raise ValueError("broker peer process is not live") from None
+            if IS_WINDOWS:
+                # Windows has no process groups; liveness is the recorded property.
+                if not winsupport.pid_alive(peer_pid):
+                    raise ValueError("broker peer process is not live")
+                client_process_group = None
+            else:
+                try:
+                    client_process_group = os.getpgid(peer_pid)
+                except (ProcessLookupError, PermissionError):
+                    raise ValueError("broker peer process is not live") from None
             cwd = self._validated_cwd(str(request["cwd"]))
 
             started_at = utc_now()
             started_ns = time.time_ns()
-            started_monotonic = time.monotonic()
+            started_monotonic = monotonic()
             call_id = uuid.uuid4().hex
             record: dict[str, object] = {
                 "schema": CALL_SCHEMA,
@@ -2181,14 +2502,15 @@ class PairmuxBroker:
             with self._lock:
                 self._calls.append(record)
             try:
+                stdio = [subprocess.DEVNULL if value is None else value for value in descriptors]
                 process = subprocess.Popen(
                     [str(self.real_pairmux), *argv],
                     cwd=cwd,
                     env=self.fixed_env,
-                    stdin=descriptors[0],
-                    stdout=descriptors[1],
-                    stderr=descriptors[2],
-                    start_new_session=True,
+                    stdin=stdio[0],
+                    stdout=stdio[1],
+                    stderr=stdio[2],
+                    **launch_options(),
                 )
             except (OSError, ValueError) as error:
                 message = f"cannot execute fixed real pairmux: {error}"
@@ -2231,13 +2553,17 @@ class PairmuxBroker:
                 if execution.cancel.wait(0.05):
                     if termination_sent is None:
                         termination_sent = signal.SIGTERM
-                        termination_deadline = time.monotonic() + 1.0
+                        termination_deadline = monotonic() + 1.0
                         self._signal_child(process, signal.SIGTERM)
-                    elif termination_deadline and time.monotonic() >= termination_deadline:
-                        termination_sent = signal.SIGKILL
+                    elif termination_deadline and monotonic() >= termination_deadline:
+                        termination_sent = SIGKILL
                         termination_deadline = None
-                        self._signal_child(process, signal.SIGKILL)
+                        self._signal_child(process, SIGKILL)
             returncode = process.wait()
+            if IS_WINDOWS and termination_sent is not None:
+                # TerminateProcess exit codes are arbitrary; record the runner's termination as
+                # the signal it stands for, exactly as a POSIX signal death is recorded.
+                returncode = -termination_sent
             execution.done.set()
             with self._lock:
                 self._active.pop(call_id, None)
@@ -2295,12 +2621,16 @@ class PairmuxBroker:
         with self._lock:
             for call_id, execution in self._active.items():
                 child_live = execution.process.poll() is None
-                try:
-                    client_group = os.getpgid(int(execution.record["client_pid"]))
-                    client_live = True
-                except (ProcessLookupError, PermissionError):
+                if IS_WINDOWS:
                     client_group = None
-                    client_live = False
+                    client_live = winsupport.pid_alive(int(execution.record["client_pid"]))
+                else:
+                    try:
+                        client_group = os.getpgid(int(execution.record["client_pid"]))
+                        client_live = True
+                    except (ProcessLookupError, PermissionError):
+                        client_group = None
+                        client_live = False
                 client_group_matches = client_group == process.pid
                 client_ancestry_matches = client_live and process_descends_from(
                     int(execution.record["client_pid"]), process.pid
@@ -2329,6 +2659,16 @@ class PairmuxBroker:
         if self._final is not None:
             return self._final
         self._closing.set()
+        if IS_WINDOWS and self._listener is not None and self.pipe_address:
+            # A blocked named-pipe accept only returns for a client: wake it, then close.
+            try:
+                from multiprocessing.connection import Client
+
+                Client(self.pipe_address, family="AF_PIPE").close()
+            except OSError:
+                pass
+            if self._listener_thread is not None:
+                self._listener_thread.join(timeout)
         if self._listener is not None:
             self._listener.close()
         with self._lock:
@@ -2340,11 +2680,11 @@ class PairmuxBroker:
                 execution.cancel.set()
         if self._listener_thread is not None:
             self._listener_thread.join(timeout)
-        deadline = time.monotonic() + timeout
+        deadline = monotonic() + timeout
         with self._lock:
             handlers = list(self._handler_threads)
         for handler in handlers:
-            handler.join(max(0.0, deadline - time.monotonic()))
+            handler.join(max(0.0, deadline - monotonic()))
         live_handlers = [handler.name for handler in handlers if handler.is_alive()]
         if live_handlers:
             self._error(f"broker handlers did not stop: {live_handlers}")
@@ -2636,7 +2976,7 @@ def s05_handoff_call(calls: list[dict[str, object]]) -> dict[str, object] | None
             subcommand == "run"
             and call.get("exit_code") == 0
             and terminal
-            and any("secret.sh" in value for value in arguments)
+            and any(evallib.fixture_name("secret.sh") in value for value in arguments)
         ):
             prompt_terminals.add(terminal)
         if subcommand == "wait":
@@ -2653,6 +2993,13 @@ def decoded_calls(calls: list[dict[str, object]]) -> list[tuple[int, dict[str, o
         if command is not None:
             decoded.append((index, call, command[0], command[1]))
     return decoded
+
+
+# A REPL launch. Windows also starts one as `python.exe`, via the `py` launcher, or by path.
+S06_REPL_PATTERN = (
+    r"(^|[/\\\s])(python3?(\.exe)?|py(\.exe)?)(?:\s|$)" if IS_WINDOWS
+    else r"(^|[/\s])python3?(?:\s|$)"
+)
 
 
 def validate_scenario_calls(scenario: str, calls: list[dict[str, object]]) -> list[str]:
@@ -2678,7 +3025,7 @@ def validate_scenario_calls(scenario: str, calls: list[dict[str, object]]) -> li
                 call.get("cancel_reason") == "client-disconnected"
                 and call.get("client_connected_at_finish") is False
                 and isinstance(exit_signal, int)
-                and exit_signal in {signal.SIGTERM, signal.SIGKILL}
+                and exit_signal in {signal.SIGTERM, SIGKILL}
                 and call.get("exit_code") == -exit_signal
                 and isinstance(received_signals, list)
                 and exit_signal in received_signals
@@ -2717,9 +3064,10 @@ def validate_scenario_calls(scenario: str, calls: list[dict[str, object]]) -> li
         if not runs:
             errors.append("no successful proxied run produced PAIRMUX-S01-OK")
     elif scenario == "S02":
-        runs = [item for item in matching("run", "slow-build.sh") if item[1].get("exit_code") == 0]
+        build = evallib.fixture_name("slow-build.sh")
+        runs = [item for item in matching("run", build) if item[1].get("exit_code") == 0]
         if not runs:
-            errors.append("no successful proxied run executed slow-build.sh")
+            errors.append(f"no successful proxied run executed {build}")
     elif scenario == "S03":
         displays = matching("run", "haystack.log")
         proved = False
@@ -2737,7 +3085,7 @@ def validate_scenario_calls(scenario: str, calls: list[dict[str, object]]) -> li
         if not proved:
             errors.append("missing later proxied log --grep on the terminal that displayed haystack.log")
     elif scenario == "S04":
-        prompts = matching("run", "confirm.sh")
+        prompts = matching("run", evallib.fixture_name("confirm.sh"))
         answers = matching("send")
         proved = False
         for prompt_index, _call, prompt_args in prompts:
@@ -2762,8 +3110,8 @@ def validate_scenario_calls(scenario: str, calls: list[dict[str, object]]) -> li
     elif scenario == "S06":
         repls = [
             (index, terminal)
-            for index, terminal, program in program_launches("python")
-            if re.search(r"(^|[/\s])python3?(?:\s|$)", program)
+            for index, terminal, program in program_launches("py" if IS_WINDOWS else "python")
+            if re.search(S06_REPL_PATTERN, program)
         ]
         proved = False
         for start_index, terminal in repls:
@@ -2793,8 +3141,8 @@ def validate_scenario_calls(scenario: str, calls: list[dict[str, object]]) -> li
         if not escaped:
             errors.append("no proxied q was sent to the report pager")
     elif scenario == "S08":
-        servers = program_launches("server.sh")
-        clients = program_launches("hit.sh")
+        servers = program_launches(evallib.fixture_name("server.sh"))
+        clients = program_launches(evallib.fixture_name("hit.sh"))
         proved = False
         for server_index, server_terminal, _server_program in servers:
             for client_index, client_terminal, _client_program in clients:
@@ -2848,7 +3196,7 @@ def validate_scenario_calls(scenario: str, calls: list[dict[str, object]]) -> li
 
 
 def read_subgoals(path: Path) -> list[dict[str, object]]:
-    """Read a check.sh-written subgoal ledger (M suite). Best effort: an
+    """Read a check.py-written subgoal ledger (M suite). Best effort: an
     absent or malformed file simply yields no subgoals."""
     if not path.is_file():
         return []
@@ -2993,7 +3341,9 @@ def install_opencode_auth(
     destination = Path(env["XDG_DATA_HOME"]) / "opencode/auth.json"
     atomic_private_json(destination, payload)
     metadata = destination.stat()
-    if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o600:
+    if not stat.S_ISREG(metadata.st_mode) or (
+        not IS_WINDOWS and stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
         raise RuntimeError("isolated OpenCode credential permissions are invalid")
     return (
         {
@@ -3058,6 +3408,20 @@ def cleanup_control_root(control_root: Path, credential_path: Path | None) -> st
 
 def relative(path: Path, root: Path) -> str:
     return str(path.relative_to(root))
+
+
+def cleanup_endpoint(socket_name: str, env: dict[str, str], log_path: Path) -> None:
+    """Stop the episode's own pairmux endpoint: its tmux server, or (Windows, and wherever
+    pairmux picks its built-in server) every terminal on it so the server idles out."""
+    if evallib.effective_backend(env) == "tmux":
+        cleanup_tmux(socket_name, env, log_path)
+        return
+    try:
+        evallib.stop_endpoint(socket_name, env, "builtin")
+    except (OSError, subprocess.SubprocessError) as error:
+        log_path.write_text(f"built-in endpoint cleanup failed: {type(error).__name__}\n", encoding="utf-8")
+        return
+    log_path.write_text("built-in endpoint: kill --all requested\n", encoding="utf-8")
 
 
 def cleanup_tmux(socket_name: str, env: dict[str, str], log_path: Path) -> None:
@@ -3135,7 +3499,7 @@ def run_episode(
     if endpoint is not None and endpoint_secret is None:
         raise ValueError("endpoint execution requires a runtime credential")
     episode_started_at = utc_now()
-    episode_started = time.monotonic()
+    episode_started = monotonic()
     uniqueness = hashlib.sha256(f"{run_id}:{scenario}:{repetition}".encode()).hexdigest()[:12]
     episode_id = f"{scenario}-r{repetition:02d}-{uniqueness[:6]}"
     episode_root = run_root / "episodes" / episode_id
@@ -3146,8 +3510,7 @@ def run_episode(
     artifact_root.mkdir()
 
     # Keep Unix socket paths below macOS's 104-byte sockaddr_un limit.
-    control_root = Path(tempfile.mkdtemp(prefix="pairmux-eval-control-", dir="/tmp")).resolve()
-    control_root.chmod(0o700)
+    control_root = private_temp_root("pairmux-eval-control-")
     control_runtime = control_root / "runtime"
     evidence_dir = control_root / "evidence"
     proxy_dir = control_runtime / "bin"
@@ -3190,13 +3553,8 @@ def run_episode(
     skill_artifact_dir = artifact_root / "skill"
     make_read_only_tree(control_root / "evals")
 
-    proxy_path = proxy_dir / "pairmux"
-    if terminal_harness == "pmx-cli":
-        shutil.copy2(PROXY_SOURCE, proxy_path)
-    else:
-        proxy_path.write_text(PAIRMUX_STUB, encoding="utf-8")
-    proxy_path.chmod(0o555)
-    real_proxy_target = control_runtime / "real-pairmux"
+    proxy_path, proxy_install_method = install_pairmux_proxy(proxy_dir, terminal_harness)
+    real_proxy_target = control_runtime / ("real-pairmux" + evallib.EXE_SUFFIX)
     shutil.copy2(real_pairmux, real_proxy_target)
     real_proxy_target.chmod(0o555)
     proxy_dir.chmod(0o555)
@@ -3220,7 +3578,7 @@ def run_episode(
         endpoint=endpoint,
     )
 
-    host_home = Path(os.environ.get("HOME", "~")).expanduser()
+    host_home = host_home_directory()
     clean_env = isolated_agent_env(
         os.environ.copy(), agent=agent, isolated_home=isolated_home, endpoint=endpoint
     )
@@ -3237,7 +3595,20 @@ def run_episode(
     if agent == "opencode" and endpoint is None:
         models_cache = seed_opencode_models_cache(clean_env)
     tmux_tmpdir = clean_env.get("TMPDIR", "/tmp")
-    state_namespace = pairmux_state_namespace(state_dir, socket_name, tmux_tmpdir)
+    # Endpoint variables shared by setup, agent, broker and check. Windows always uses pairmux's
+    # built-in server, whose AF_UNIX socket path is capped at 100 bytes: pin its runtime root to a
+    # short private directory directly under TEMP rather than the deep isolated LOCALAPPDATA.
+    endpoint_env: dict[str, str] = {"PAIRMUX_SOCKET": socket_name, "PAIRMUX_STATE_DIR": str(state_dir)}
+    pairmux_tmpdir: Path | None = None
+    if IS_WINDOWS:
+        pairmux_tmpdir = Path(tempfile.mkdtemp(prefix="pmx-")).resolve()
+        endpoint_env.update({"PAIRMUX_TMPDIR": str(pairmux_tmpdir), "PAIRMUX_BACKEND": "builtin"})
+    else:
+        endpoint_env["TMUX_TMPDIR"] = tmux_tmpdir
+    state_namespace = pairmux_state_namespace(
+        state_dir, socket_name, tmux_tmpdir, {**clean_env, **endpoint_env}
+    )
+    endpoint_env["PAIRMUX_STATE_NAMESPACE"] = str(state_namespace)
     env_file = control_runtime / "env.sh"
     setup_env = clean_env.copy()
     setup_env.update(
@@ -3251,10 +3622,7 @@ def run_episode(
             "PAIRMUX_EVAL_ENV_FILE": str(env_file),
             "PAIRMUX_REAL_BIN": real_pairmux,
             "PAIRMUX_BIN": real_pairmux,
-            "PAIRMUX_SOCKET": socket_name,
-            "PAIRMUX_STATE_DIR": str(state_dir),
-            "TMUX_TMPDIR": tmux_tmpdir,
-            "PAIRMUX_STATE_NAMESPACE": str(state_namespace),
+            **endpoint_env,
         }
     )
     control_timeout = 60.0
@@ -3305,7 +3673,7 @@ def run_episode(
                 endpoint=endpoint, endpoint_config_path=endpoint_config_path,
             )
         setup_result = run_process(
-            [str(control_scenario / "setup.sh")],
+            evallib.python_argv(control_scenario / "setup.py"),
             cwd=scenario_dir,
             env=setup_env,
             stdout_path=evidence_dir / "setup.stdout.log",
@@ -3338,7 +3706,7 @@ def run_episode(
                 )
             if terminal_harness == "pmx-cli":
                 assert skill_dir is not None
-                discovery_started = time.monotonic()
+                discovery_started = monotonic()
                 try:
                     discovery = verify_skill_discovery(
                         agent=agent,
@@ -3356,7 +3724,7 @@ def run_episode(
                         endpoint_config_path=endpoint_config_path,
                     )
                 finally:
-                    discovery_duration_seconds = round(time.monotonic() - discovery_started, 6)
+                    discovery_duration_seconds = round(monotonic() - discovery_started, 6)
             else:
                 discovery = {
                     "verified": False,
@@ -3372,36 +3740,32 @@ def run_episode(
                         "PAIRMUX_BIN": str(proxy_path),
                         "PAIRMUX_EVAL_PROXY_DIR": str(proxy_dir),
                         "PAIRMUX_EVAL_PROXY_BIN": str(proxy_path),
-                        "PAIRMUX_SOCKET": socket_name,
-                        "PAIRMUX_STATE_DIR": str(state_dir),
-                        "TMUX_TMPDIR": tmux_tmpdir,
-                        "PAIRMUX_STATE_NAMESPACE": str(state_namespace),
+                        **endpoint_env,
                     }
                 )
             else:
                 # Baselines never see PAIRMUX_* names; the shared tmux endpoint
                 # (used by fixtures, the M03 human bot, and check assertions)
-                # is advertised under a neutral name instead.
-                agent_env.update(
-                    {
-                        "EVAL_TMUX_SOCKET": socket_name,
-                        "TMUX_TMPDIR": tmux_tmpdir,
-                    }
-                )
+                # is advertised under a neutral name instead. Windows has no tmux,
+                # so its shell baseline gets no terminal endpoint at all.
+                if not IS_WINDOWS:
+                    agent_env.update(
+                        {
+                            "EVAL_TMUX_SOCKET": socket_name,
+                            "TMUX_TMPDIR": tmux_tmpdir,
+                        }
+                    )
             agent_env.update(shell_path_guard)
             broker_env = clean_env.copy()
             broker_env.update(
                 {
                     "PAIRMUX_BIN": str(real_proxy_target),
                     "PAIRMUX_REAL_BIN": str(real_proxy_target),
-                    "PAIRMUX_SOCKET": socket_name,
-                    "PAIRMUX_STATE_DIR": str(state_dir),
-                    "TMUX_TMPDIR": tmux_tmpdir,
-                    "PAIRMUX_STATE_NAMESPACE": str(state_namespace),
+                    **endpoint_env,
                 }
             )
             broker = PairmuxBroker(
-                control_runtime / "broker.sock",
+                control_runtime / ("broker.pipe" if IS_WINDOWS else "broker.sock"),
                 real_pairmux=real_proxy_target,
                 real_pairmux_sha256=pairmux_sha256,
                 fixed_env=broker_env,
@@ -3466,7 +3830,7 @@ def run_episode(
             )
             verify_hashes(control_hashes)
             check_result = run_process(
-                [str(control_scenario / "check.sh"), str(transcript_path)],
+                evallib.python_argv(control_scenario / "check.py", str(transcript_path)),
                 cwd=scenario_dir,
                 env=check_env,
                 stdout_path=evidence_dir / "check.stdout.log",
@@ -3482,9 +3846,11 @@ def run_episode(
             try:
                 if broker is not None:
                     broker.stop_and_finalize()
-                cleanup_tmux(socket_name, setup_env, evidence_dir / "cleanup.log")
+                cleanup_endpoint(socket_name, setup_env, evidence_dir / "cleanup.log")
             finally:
-                shutil.rmtree(Path(shell_path_guard["BASH_ENV"]).parent, ignore_errors=True)
+                remove_shell_path_guard(shell_path_guard)
+                if pairmux_tmpdir is not None:
+                    shutil.rmtree(pairmux_tmpdir, ignore_errors=True)
                 if endpoint_secret is not None:
                     try:
                         endpoint_artifacts_scrubbed |= sanitize_endpoint_artifacts(evidence_dir, endpoint_secret)
@@ -3548,6 +3914,7 @@ def run_episode(
             "control_root_exposed_in_task": False,
             "worktree_contains_control_scripts": False,
             "proxy_trace_transport": "runner-owned-execution-broker",
+            "proxy_install_method": proxy_install_method,
             "broker_ledger_serialized_after_agent": True,
             "broker_request_can_report_evidence": False,
             "broker_denied_cwd_requests_are_audited": True,
@@ -3632,7 +3999,7 @@ def run_episode(
         "pass": category is None,
         "outcome": outcome,
         "steps": len(calls),
-        "wall_time_seconds": round(time.monotonic() - episode_started, 6),
+        "wall_time_seconds": round(monotonic() - episode_started, 6),
         "discovery_duration_seconds": discovery_duration_seconds,
         "agent_duration_seconds": agent_result.duration_seconds if agent_result else None,
         "failure_class": category,
@@ -3823,7 +4190,7 @@ def summarize(
         "run_id": run_id,
         "started_at": started_at,
         "finished_at": utc_now(),
-        "wall_time_seconds": round(time.monotonic() - started_monotonic, 6),
+        "wall_time_seconds": round(monotonic() - started_monotonic, 6),
         "agent": agent,
         "agent_version": agent_version,
         "model": model or "default",
@@ -4097,6 +4464,8 @@ def main(argv: list[str] | None = None) -> int:
             "Hugging Face OpenCode models require --opencode-auth-env HF_TOKEN "
             "or --opencode-auth-file"
         )
+    if IS_WINDOWS and args.terminal_harness == "rawtmux":
+        parser.error(RAWTMUX_WINDOWS_ERROR)
     try:
         scenarios = parse_scenarios(args.scenario, discover_scenarios())
     except ValueError as error:
@@ -4114,9 +4483,13 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(f"rawtmux cheat-sheet is missing: {HARNESS_NOTES_SOURCE}")
 
     agent_executable = shutil.which(args.agent) or args.agent
+    try:
+        agent_command(agent_executable)
+    except ValueError as error:
+        parser.error(str(error))
     if args.dry_run:
         for scenario in scenarios:
-            task = (SCENARIOS_DIR / scenario / "TASK.md").read_text(encoding="utf-8")
+            task = evallib.task_path(SCENARIOS_DIR / scenario).read_text(encoding="utf-8")
             for repetition in range(1, args.repeat + 1):
                 plan = {
                     "agent": args.agent,
@@ -4179,7 +4552,7 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(str(error))
 
     run_started_at = utc_now()
-    run_started = time.monotonic()
+    run_started = monotonic()
     git_start = git_provenance()
     run_id, run_root = make_run_root(args.output_dir)
     agent_executable = str(Path(shutil.which(args.agent) or args.agent).resolve())
@@ -4200,7 +4573,7 @@ def main(argv: list[str] | None = None) -> int:
         for scenario in scenarios:
             for repetition in range(1, args.repeat + 1):
                 episode_attempt_started_at = utc_now()
-                episode_attempt_started = time.monotonic()
+                episode_attempt_started = monotonic()
                 try:
                     result = run_episode(
                         run_root=run_root,
@@ -4261,7 +4634,7 @@ def main(argv: list[str] | None = None) -> int:
                         "outcome": "failed",
                         "steps": 0,
                         "broker_policy_rejections": 0,
-                        "wall_time_seconds": round(time.monotonic() - episode_attempt_started, 6),
+                        "wall_time_seconds": round(monotonic() - episode_attempt_started, 6),
                         "started_at": episode_attempt_started_at,
                         "finished_at": utc_now(),
                         "timeout_seconds": args.timeout,

@@ -46,7 +46,10 @@ def recv_frame(connection: socket.socket) -> dict[str, object]:
     length = struct.unpack("!I", recv_exact(connection, 4))[0]
     if length > MAX_FRAME_BYTES:
         raise ValueError("pairmux eval broker response exceeds 32 KiB")
-    payload = json.loads(recv_exact(connection, length))
+    return validate_result(json.loads(recv_exact(connection, length)))
+
+
+def validate_result(payload: object) -> dict[str, object]:
     if (
         not isinstance(payload, dict)
         or set(payload) != {"schema", "returncode", "error"}
@@ -59,7 +62,42 @@ def recv_frame(connection: socket.socket) -> dict[str, object]:
     return payload
 
 
+def windows_main() -> int:
+    """Named-pipe transport: the request plus this process's std handle values, which the
+    broker duplicates out of this (kernel-identified) process, as SCM_RIGHTS does on POSIX."""
+    import _winapi
+    from multiprocessing.connection import Client
+
+    runtime = Path(sys.argv[0]).resolve().parent.parent
+    request = encode_frame({"schema": REQUEST_SCHEMA, "argv": sys.argv[1:], "cwd": os.getcwd()})
+    handles = [
+        int(_winapi.GetStdHandle(kind) or 0)
+        for kind in (_winapi.STD_INPUT_HANDLE, _winapi.STD_OUTPUT_HANDLE, _winapi.STD_ERROR_HANDLE)
+    ]
+    try:
+        address = (runtime / "broker.pipe").read_text(encoding="utf-8").strip()
+        connection = Client(address, family="AF_PIPE")
+        try:
+            connection.send_bytes(request[4:])
+            connection.send_bytes(struct.pack("<3Q", *(value & 0xFFFFFFFFFFFFFFFF for value in handles)))
+            encoded = connection.recv_bytes(MAX_FRAME_BYTES)
+        finally:
+            connection.close()
+        result = validate_result(json.loads(encoded))
+    except KeyboardInterrupt:
+        return 130
+    except (ConnectionError, EOFError, json.JSONDecodeError, OSError, ValueError) as error:
+        print(f"pairmux eval proxy: {error}", file=sys.stderr)
+        return 125
+    if result["error"]:
+        print(f"pairmux eval broker: {result['error']}", file=sys.stderr)
+    returncode = int(result["returncode"])
+    return 128 + (-returncode) if returncode < 0 else returncode
+
+
 def main() -> int:
+    if os.name == "nt":
+        return windows_main()
     if os.name != "posix" or not hasattr(socket, "SCM_RIGHTS"):
         print("pairmux eval proxy: Unix descriptor passing is required", file=sys.stderr)
         return 125

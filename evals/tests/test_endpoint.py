@@ -25,7 +25,14 @@ runner = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = runner
 SPEC.loader.exec_module(runner)
 KEY_NAME = "PAIRMUX_EVAL_API_KEY"
+MOCK_PAIRMUX = "pairmux.exe" if os.name == "nt" else "pairmux"
 KEY = "endpoint-test-secret-do-not-export-71fd"
+
+
+def program(argv0: str) -> str:
+    """The program name of argv[0]; Windows launches agent CLIs through their `.exe`."""
+    name = Path(argv0).name
+    return name[:-4] if os.name == "nt" and name.lower().endswith(".exe") else name
 
 
 class EndpointTests(unittest.TestCase):
@@ -35,11 +42,21 @@ class EndpointTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.bin_dir = self.root / "bin"
         self.bin_dir.mkdir()
+        mock_source = Path(__file__).with_name("mock_bin.py")
         for name in ("opencode", "claude", "codex", "pairmux"):
+            if os.name == "nt":
+                runner.winsupport.make_console_launcher(mock_source, self.bin_dir, name)
+                continue
             path = self.bin_dir / name
-            shutil.copy2(Path(__file__).with_name("mock_bin.py"), path)
+            shutil.copy2(mock_source, path)
             path.chmod(0o755)
+        # Windows processes cannot start without their system variables (SYSTEMROOT, ...).
+        windows_system = {
+            name: value for name, value in os.environ.items()
+            if os.name == "nt" and name.upper() in runner.WINDOWS_SYSTEM_ENV_NAMES
+        }
         self.env = {
+            **windows_system,
             "PATH": str(self.bin_dir) + os.pathsep + os.environ.get("PATH", ""),
             "HOME": str(self.root / "poison-host-home"),
             KEY_NAME: KEY,
@@ -69,7 +86,7 @@ class EndpointTests(unittest.TestCase):
             "--model", "qwen/qwen3.8-27b" if agent == "opencode" else "qwen3.8-27b",
             "--endpoint-base-url", "http://127.0.0.1:8080/v1",
             "--endpoint-key-env", KEY_NAME, "--scenario", "S01", "--timeout", "5",
-            "--pairmux-bin", str(self.bin_dir / "pairmux"),
+            "--pairmux-bin", str(self.bin_dir / MOCK_PAIRMUX),
             "--output-dir", str(self.root / "runs"), *extra,
         ]
 
@@ -162,6 +179,7 @@ class EndpointTests(unittest.TestCase):
             self.main(self.arguments("claude"), env)
         self.assertEqual(caught.exception.code, 2)
 
+    @unittest.skipIf(os.name == "nt", "POSIX mode bits; Windows protects the private HOME with ACLs")
     def test_private_provider_configs_pin_protocol_models_and_hash_no_secret(self) -> None:
         for agent in ("opencode", "claude", "codex"):
             with self.subTest(agent=agent):
@@ -243,10 +261,10 @@ class EndpointTests(unittest.TestCase):
 
         def process(argv, **kwargs):
             captures["processes"].append((argv, kwargs["env"].copy()))
-            if fail_setup and Path(argv[0]).name == "setup.sh":
+            if fail_setup and any(Path(value).name == "setup.py" for value in argv):
                 return runner.ProcessResult(1, False, 0.01)
             result = original_process(argv, **kwargs)
-            if Path(argv[0]).name == agent:
+            if program(argv[0]) == agent:
                 captures["agent_env"] = kwargs["env"].copy()
                 if leak:
                     with kwargs["stdout_path"].open("a") as stream:
@@ -263,6 +281,10 @@ class EndpointTests(unittest.TestCase):
     def assert_sealed(self, env: dict[str, str], *, selected: bool = False, agent: str = "opencode") -> None:
         for name, value in self.env.items():
             if name in {"PATH", "HOME", "PAIRMUX_MOCK_AGENT_LOG", "PAIRMUX_MOCK_VERSION_LOG"}:
+                continue
+            if os.name == "nt" and name.upper() in runner.WINDOWS_SYSTEM_ENV_NAMES:
+                # OS/machine locators every Windows process needs; never profile or credentials.
+                self.assertEqual(env.get(name), value)
                 continue
             if selected and (name == KEY_NAME or name == "ANTHROPIC_API_KEY" and agent == "claude"):
                 self.assertEqual(env.get(name), KEY)
@@ -290,7 +312,7 @@ class EndpointTests(unittest.TestCase):
                 for env in captures["probes"] + captures["broker_envs"] + [captures["prepare_env"]]:
                     self.assert_sealed(env, agent=agent)
                 for argv, env in captures["processes"]:
-                    self.assert_sealed(env, selected=Path(argv[0]).name == agent, agent=agent)
+                    self.assert_sealed(env, selected=program(argv[0]) == agent, agent=agent)
                 self.assert_sealed(captures["agent_env"], selected=True, agent=agent)
                 self.assert_sealed(captures["discovery_env"], selected=True, agent=agent)
                 self.assertNotIn(KEY, stdout + stderr)
@@ -331,7 +353,7 @@ class EndpointTests(unittest.TestCase):
 
         def process(argv, **kwargs):
             result = original_process(argv, **kwargs)
-            if Path(argv[0]).name == "check.sh":
+            if any(Path(value).name == "check.py" for value in argv):
                 Path(kwargs["env"]["PAIRMUX_EVAL_SUBGOALS_FILE"]).write_text(json.dumps({
                     "schema": "pairmux.eval.subgoals.v1",
                     "subgoals": [
@@ -401,12 +423,12 @@ class EndpointTests(unittest.TestCase):
 
         def process(argv, **kwargs):
             result = original_process(argv, **kwargs)
-            if Path(argv[0]).name == "claude":
+            if program(argv[0]) == "claude":
                 (kwargs["cwd"] / "raw-leak.txt").write_text(KEY)
                 config_paths.append(Path(kwargs["env"]["CLAUDE_CONFIG_DIR"]) / "endpoint-settings.json")
             return result
 
-        with mock.patch.object(runner, "run_process", side_effect=process), mock.patch.object(runner, "cleanup_tmux", side_effect=RuntimeError("cleanup mock " + KEY)):
+        with mock.patch.object(runner, "run_process", side_effect=process), mock.patch.object(runner, "cleanup_endpoint", side_effect=RuntimeError("cleanup mock " + KEY)):
             code, stdout, stderr = self.main(self.arguments("claude"))
         self.assertEqual(code, 1)
         self.assertTrue(config_paths)
@@ -522,7 +544,7 @@ class EndpointTests(unittest.TestCase):
                 output = json.dumps(assistant) + "\n" + json.dumps(result) + "\n"
 
                 def process(argv, **kwargs):
-                    if Path(argv[0]).name == "claude":
+                    if program(argv[0]) == "claude":
                         argv = [sys.executable, "-I", "-B", "-c", "import sys; sys.stdout.write(" + repr(output) + "); sys.exit(1)"]
                     return original_process(argv, **kwargs)
 
@@ -668,7 +690,7 @@ class EndpointTests(unittest.TestCase):
                 output = json.dumps({"type": "item.completed", "item": {"type": "error", "message": "Model metadata not found; fallback metadata"}}) + "\n" + json.dumps(event)
 
                 def process(argv, **kwargs):
-                    if Path(argv[0]).name == "codex":
+                    if program(argv[0]) == "codex":
                         argv = [sys.executable, "-I", "-B", "-c", "import sys; sys.stdout.write(" + repr(output) + "); sys.exit(1)"]
                     return original_process(argv, **kwargs)
 
@@ -689,14 +711,14 @@ class EndpointTests(unittest.TestCase):
         callbacks: list[object] = []
 
         def process(argv, **kwargs):
-            if Path(argv[0]).name == "codex":
+            if program(argv[0]) == "codex":
                 callbacks.append(kwargs.get("early_stdout_failure_detector"))
             return original_process(argv, **kwargs)
 
         with mock.patch.object(runner, "run_process", side_effect=process):
             code, _, stderr = self.main(self.arguments("codex"))
             self.assertEqual(code, 0, stderr)
-            args = ["--agent", "codex", "--scenario", "S01", "--timeout", "5", "--pairmux-bin", str(self.bin_dir / "pairmux"), "--output-dir", str(self.root / "nonendpoint-runs")]
+            args = ["--agent", "codex", "--scenario", "S01", "--timeout", "5", "--pairmux-bin", str(self.bin_dir / MOCK_PAIRMUX), "--output-dir", str(self.root / "nonendpoint-runs")]
             code, _, stderr = self.main(args)
             self.assertEqual(code, 0, stderr)
         self.assertEqual(callbacks, [runner.codex_endpoint_provider_failure, None])
@@ -726,6 +748,7 @@ class EndpointTests(unittest.TestCase):
             for text in ("Assistant says provider 503 error", '{"type":"assistant","text":"API Error: 503"}', "503 service unavailable", "warning: 429 test fixture"):
                 self.assertIsNone(runner.endpoint_provider_failure(agent, text))
 
+    @unittest.skipIf(os.name == "nt", "symbolic links and FIFOs need POSIX (unprivileged Windows cannot create them)")
     def test_artifact_scrubber_never_follows_links_or_keeps_key_named_files(self) -> None:
         root = self.root / "scrub"
         root.mkdir()

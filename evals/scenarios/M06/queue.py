@@ -7,25 +7,29 @@ import sys
 import time
 
 ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+import termsupport  # noqa: E402
+
 LOG = ROOT / 'queue.jsonl'
 
 
 def record(event, **fields):
-    row = dict(event=event, pid=os.getpid(), ppid=os.getppid(), sid=os.getsid(0),
-               tty=os.ttyname(0), cwd=os.getcwd(), time_ns=time.monotonic_ns(), **fields)
-    with LOG.open('a') as handle:
+    ppid, sid, tty = termsupport.identity(0)
+    row = dict(event=event, pid=os.getpid(), ppid=ppid, sid=sid,
+               tty=tty, cwd=os.getcwd(), time_ns=termsupport.event_ns(), **fields)
+    with LOG.open('a', encoding="utf-8") as handle:
         handle.write(json.dumps(row) + '\n')
     return row
 
 
 def priority():
-    return dict(line.split('=', 1) for line in (ROOT / 'priority.txt').read_text().splitlines())
+    return dict(line.split('=', 1) for line in (ROOT / 'priority.txt').read_text(encoding="utf-8").splitlines())
 
 
 def checkpoint():
     row = record('checkpoint', revision=priority()['revision'])
     temporary = ROOT / 'checkpoint.json.tmp'
-    temporary.write_text(json.dumps(row) + '\n')
+    temporary.write_text(json.dumps(row) + '\n', encoding="utf-8")
     temporary.replace(ROOT / 'checkpoint.json')
     print('CHECKPOINT reached — waiting for the human priority update', flush=True)
     deadline = time.monotonic() + 180
@@ -33,7 +37,7 @@ def checkpoint():
         if time.monotonic() > deadline:
             raise SystemExit('human update did not arrive')
         time.sleep(0.2 * float(os.environ.get('EVAL_TIME_SCALE', '1')))
-    note = (ROOT / 'human-note.txt').read_text().strip()
+    note = (ROOT / 'human-note.txt').read_text(encoding="utf-8").strip()
     record('note_observed', revision=priority()['revision'], note=note)
     print(note, flush=True)
 
@@ -53,7 +57,7 @@ elif len(sys.argv) == 3 and sys.argv[1] == 'work' and sys.argv[2] in ('release',
     revision = priority()['revision']
     record('started', job=job, revision=revision)
     time.sleep(0.4 * float(os.environ.get('EVAL_TIME_SCALE', '1')))
-    (ROOT / f'{job}.txt').write_text(f'COMPLETE {job} revision={revision}\n')
+    (ROOT / f'{job}.txt').write_text(f'COMPLETE {job} revision={revision}\n', encoding="utf-8")
     record('completed', job=job, revision=revision)
     print(f'COMPLETE {job} revision={revision}', flush=True)
 else:

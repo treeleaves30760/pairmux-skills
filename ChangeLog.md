@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-19
+
+Requires pairmux CLI >=1.5.0 for the Windows statements (native Windows TUI, `update` and
+console-mode prompt detection); the `events` guidance still requires CLI >=1.4.0, the hierarchy
+guidance CLI >=1.2.0, and all other guidance is unchanged for CLI >=1.0.0.
+
+### Added
+
+- The eval scenarios run natively on Windows 10 1809+ (pairmux's built-in ConPTY multiplexer,
+  PowerShell terminals), without tmux, bash or WSL. Scenarios whose fixtures are POSIX shell scripts
+  carry a `windows/` overlay of Python twins and a PowerShell-worded `windows/TASK.md`; fixtures that
+  record their live terminal use the new `evals/termsupport.py` (console identity on Windows, the
+  unchanged `ppid`/`sid`/`/dev/tty…` facts on POSIX).
+- `evals/test_scenarios.py`: the cross-platform golden self-test (`evals/test-scenarios.sh` is now a
+  thin POSIX wrapper for it).
+- A `windows-latest` CI job that installs pairmux from PyPI and runs the model-free tests and the
+  golden self-test.
+
+### Changed
+
+- Windows no longer "refuses `update`" or "relies on wording only". `pairmux update` works on a
+  persistent uv install there (only a custom `UV_TOOL_DIR` run from the bin copy is refused), and
+  secret-prompt detection reads the console's input mode, falling back to wording for tools that
+  read key by key (OpenSSH, Python `getpass`, `Read-Host -AsSecureString`) and for terminals
+  created before the upgrade. The `E_UPDATE` row no longer lists Windows.
+- `pairmux tui` is documented as working on Windows (Windows Terminal or a 1809+ console with VT
+  input; otherwise `E_BAD_ARGS`) instead of "not on Windows yet".
+- The environment list gains `PAIRMUX_CONSOLE_PROBE=0`, which turns the Windows console-mode
+  helper off.
+- Scenario control scripts are Python (`setup.py`, `check.py`, `golden.py`, `human.py`) sharing
+  `evals/evallib.py`, replacing `lib.sh` and the `*.sh` control scripts; run them as `python3 -I
+  setup.py` (`python -I` on Windows). `env.sh` is now data-only `export` lines that the checker parses
+  instead of sourcing. macOS/Linux task text, fixtures and scoring are unchanged.
+- `run.py` supports native Windows for the `pmx-cli` and `shell` harnesses; the `rawtmux` harness
+  (a raw-tmux comparison baseline) is rejected on Windows with a clear message because tmux does not
+  run there.
+- Root and eval READMEs list per-platform fixture prerequisites instead of requiring WSL on Windows.
+
 ## [0.5.0] - 2026-11-18
 
 Requires pairmux CLI >=1.4.0 for `events --exit-with-parent` and the `interrupted` status; the
@@ -216,7 +254,8 @@ CLIs can use manual skill installation; this skill release does not require new 
   behavior, and covers Bash/zsh hooks, Fish 4+ native OSC 133, Fish-safe sentinel fallback, and doctor
   completion tiers without conflating tiers with envelope modes.
 
-[Unreleased]: https://github.com/treeleaves30760/pairmux-skills/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/treeleaves30760/pairmux-skills/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/treeleaves30760/pairmux-skills/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/treeleaves30760/pairmux-skills/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/treeleaves30760/pairmux-skills/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/treeleaves30760/pairmux-skills/compare/v0.2.0...v0.3.0

@@ -14,6 +14,17 @@ import sys
 import time
 
 
+# S05's password fixture: secret.sh, or its Python twin on Windows (no POSIX shell there).
+SECRET_FIXTURE = "secret.py" if os.name == "nt" else "secret.sh"
+
+
+def program_name(argv0: str) -> str:
+    """The mock's role from its installed name (pairmux, opencode.exe, real-pairmux.exe, ...)."""
+    path = Path(argv0)
+    name = path.stem if path.suffix.lower() in {".exe", ".cmd", ".py"} else path.name
+    return name.removesuffix("-script")
+
+
 def append_json(path_value: str | None, payload: dict[str, object]) -> None:
     if not path_value:
         return
@@ -86,7 +97,7 @@ def run_pairmux(args: list[str]) -> int:
         with (terminal_dir / "raw.log").open("a", encoding="utf-8") as stream:
             if "PAIRMUX-S01-OK" in command_text:
                 stream.write("PAIRMUX-S01-OK\n")
-            elif "secret.sh" in command_text:
+            elif SECRET_FIXTURE in command_text:
                 stream.write("Enter deployment password:\n")
             else:
                 stream.write(command_text + "\n")
@@ -279,12 +290,12 @@ def run_agent(program: str, args: list[str]) -> int:
         return 0
     if mode == "human_handoff":
         pairmux("new", "--name", "secret")
-        pairmux("run", "secret", "./secret.sh", check=False)
+        pairmux("run", "secret", "./" + SECRET_FIXTURE, check=False)
         pairmux("wait", "secret", "--human", "--notify", check=False)
         return 0
     if mode == "completed_handoff":
         pairmux("new", "--name", "secret")
-        pairmux("run", "secret", "./secret.sh", check=False)
+        pairmux("run", "secret", "./" + SECRET_FIXTURE, check=False)
         pairmux("wait", "secret", "--human", "--timeout", "1ms", check=False)
         print(
             json.dumps(
@@ -314,7 +325,8 @@ def run_agent(program: str, args: list[str]) -> int:
             encoding="utf-8",
         )
     if mode == "forge_broker_evidence":
-        endpoint = Path(os.environ["PAIRMUX_BIN"]).resolve().parent.parent / "broker.sock"
+        runtime = Path(os.environ["PAIRMUX_BIN"]).resolve().parent.parent
+        endpoint = runtime / "broker.sock"
         forged = json.dumps(
             {
                 "schema": "pairmux.eval.call.v1",
@@ -325,11 +337,23 @@ def run_agent(program: str, args: list[str]) -> int:
             },
             separators=(",", ":"),
         ).encode()
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-            client.connect(str(endpoint))
-            client.sendall(struct.pack("!I", len(forged)) + forged)
-            client.shutdown(socket.SHUT_WR)
-            client.recv(4096)
+        if os.name == "nt":
+            from multiprocessing.connection import Client
+
+            client = Client((runtime / "broker.pipe").read_text().strip(), family="AF_PIPE")
+            try:
+                client.send_bytes(forged)
+                client.recv_bytes()
+            except (EOFError, OSError):
+                pass
+            finally:
+                client.close()
+        else:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.connect(str(endpoint))
+                client.sendall(struct.pack("!I", len(forged)) + forged)
+                client.shutdown(socket.SHUT_WR)
+                client.recv(4096)
     if mode == "source_env":
         env_file = Path(os.environ["PAIRMUX_STATE_DIR"]).parent / "env.sh"
         subprocess.run(
@@ -359,7 +383,7 @@ def run_agent(program: str, args: list[str]) -> int:
 
 
 def main() -> int:
-    program = Path(sys.argv[0]).name
+    program = program_name(sys.argv[0])
     args = sys.argv[1:]
     if program in {"pairmux", "real-pairmux"}:
         return run_pairmux(args)

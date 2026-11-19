@@ -125,8 +125,11 @@ def migrate():
         try:
             termios.tcsetattr(tty.fileno(), termios.TCSANOW, hidden)
             tty_name = subprocess.check_output(["ps", "-o", "tty=", "-p", str(os.getpid())], text=True).strip()
+            # terminal_dir: pairmux's own locator for the terminal this runs in (None
+            # elsewhere); a built-in-backend human binds the handoff to it.
             record("credential_prompt", instance=instance, tty=f"/dev/{tty_name}",
-                   pgrp=os.getpgrp(), sid=os.getsid(0))
+                   pgrp=os.getpgrp(), sid=os.getsid(0),
+                   terminal_dir=os.environ.get("PAIRMUX_TERMINAL_DIR"))
             output.write("Password: ")
             output.flush()
             password = tty.readline().rstrip("\r\n")

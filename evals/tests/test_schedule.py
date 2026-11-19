@@ -29,11 +29,21 @@ class ScheduleTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.bin_dir = self.root / "bin"
         self.bin_dir.mkdir()
+        mock_source = Path(__file__).with_name("mock_bin.py")
         for name in ("codex", "pairmux"):
+            if os.name == "nt":
+                # PATH lookup needs a PATHEXT extension: a real console launcher, as the runner uses.
+                runner.winsupport.make_console_launcher(mock_source, self.bin_dir, name)
+                continue
             target = self.bin_dir / name
-            shutil.copy2(Path(__file__).with_name("mock_bin.py"), target)
+            shutil.copy2(mock_source, target)
             target.chmod(0o755)
-        self.env = {"PATH": str(self.bin_dir) + os.pathsep + os.environ.get("PATH", "")}
+        # Windows processes (and PATHEXT lookup) need the system variables (SYSTEMROOT, ...).
+        windows_system = {
+            name: value for name, value in os.environ.items()
+            if os.name == "nt" and name.upper() in runner.WINDOWS_SYSTEM_ENV_NAMES
+        }
+        self.env = {**windows_system, "PATH": str(self.bin_dir) + os.pathsep + os.environ.get("PATH", "")}
 
     def invoke(self, failures: list[str | None], *extra: str, safety: bool = False, raise_runner_error: bool = False):
         calls = []
@@ -63,7 +73,7 @@ class ScheduleTests(unittest.TestCase):
         stdout, stderr = io.StringIO(), io.StringIO()
         arguments = [
             "--agent", "codex", "--model", "mock-model", "--provider", "mock",
-            "--scenario", "S01-S06", "--pairmux-bin", str(self.bin_dir / "pairmux"),
+            "--scenario", "S01-S06", "--pairmux-bin", str(self.bin_dir / ("pairmux.exe" if os.name == "nt" else "pairmux")),
             "--output-dir", str(self.root / "runs"), *extra,
         ]
         with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(runner, "probe_version", return_value="mock-1.0"), mock.patch.object(runner, "run_episode", side_effect=episode), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
