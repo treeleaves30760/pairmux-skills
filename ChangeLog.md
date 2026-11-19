@@ -7,8 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-The Windows statements below describe the pairmux CLI that follows 1.4.0 (native Windows TUI,
-`update` and console-mode prompt detection); all other guidance is unchanged for CLI >=1.0.0.
+## [0.6.0] - 2026-11-19
+
+Requires pairmux CLI >=1.5.0 for the Windows statements (native Windows TUI, `update` and
+console-mode prompt detection); the `events` guidance still requires CLI >=1.4.0, the hierarchy
+guidance CLI >=1.2.0, and all other guidance is unchanged for CLI >=1.0.0.
 
 ### Added
 
@@ -251,7 +254,8 @@ CLIs can use manual skill installation; this skill release does not require new 
   behavior, and covers Bash/zsh hooks, Fish 4+ native OSC 133, Fish-safe sentinel fallback, and doctor
   completion tiers without conflating tiers with envelope modes.
 
-[Unreleased]: https://github.com/treeleaves30760/pairmux-skills/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/treeleaves30760/pairmux-skills/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/treeleaves30760/pairmux-skills/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/treeleaves30760/pairmux-skills/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/treeleaves30760/pairmux-skills/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/treeleaves30760/pairmux-skills/compare/v0.2.0...v0.3.0
