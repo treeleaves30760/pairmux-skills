@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-27
+
+The opt-in sub-agent tree recipe works with pairmux CLI >=1.2.0 (`events --tree --wait` needs
+>=1.3.0); the troubleshooting entry describes the tmux environment fix shipped in CLI 1.6.0. All
+other guidance is unchanged.
+
+### Added
+
+- Opt-in recipe for running sub-agents as a pairmux tree in place of the host's native sub-agents
+  (`references/hierarchy.md`, "Opt-in: pairmux in place of native sub-agents"): only when the user
+  explicitly asks (e.g. "use pairmux to build a hierarchy of sub-agents" /
+  「使用 pairmux 來構建階層式的管理 Subagents」); otherwise agents keep their native mechanism. Covers
+  the parent loop (explicit `--model`, task with `report` + permission to recurse, `wait --note` /
+  `events --tree --wait`, `kill`), grandchildren, and environment hygiene for inherited
+  `ANTHROPIC_*` proxy variables. SKILL.md gains a short opt-in pointer with both trigger phrasings.
+- Troubleshooting: "A child agent runs the wrong model or endpoint", including the tmux-backend
+  global-environment inheritance in pairmux 1.5.1 and older (fixed in CLI 1.6.0) and its workaround.
+
+### Changed
+
+- SKILL.md drops the "known non-secret confirmation" worked example (Iron rule 3 and the golden loop
+  already cover it) to stay within 220 lines.
+
 ## [0.6.0] - 2026-11-19
 
 Requires pairmux CLI >=1.5.0 for the Windows statements (native Windows TUI, `update` and
@@ -254,7 +277,8 @@ CLIs can use manual skill installation; this skill release does not require new 
   behavior, and covers Bash/zsh hooks, Fish 4+ native OSC 133, Fish-safe sentinel fallback, and doctor
   completion tiers without conflating tiers with envelope modes.
 
-[Unreleased]: https://github.com/treeleaves30760/pairmux-skills/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/treeleaves30760/pairmux-skills/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/treeleaves30760/pairmux-skills/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/treeleaves30760/pairmux-skills/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/treeleaves30760/pairmux-skills/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/treeleaves30760/pairmux-skills/compare/v0.3.0...v0.4.0
