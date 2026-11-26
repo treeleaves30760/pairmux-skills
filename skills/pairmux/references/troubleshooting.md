@@ -176,7 +176,7 @@ in a fresh shell terminal (`env | cut -d= -f1 | grep '^ANTHROPIC_'`), never secr
 
 **pairmux 1.5.1 and older, tmux backend:** new terminals got the tmux server's *global* environment —
 captured from whichever process first started that server (e.g. a stale `alc --codex claude`
-session) — instead of the caller's. Fixed after 1.5.1. On older versions, with the same
+session) — instead of the caller's. Fixed in pairmux 1.6.0. On older versions, with the same
 `TMUX_TMPDIR`, inspect and clear the stale variables (socket `pairmux` is the top layer; a nested
 layer's socket is its `PAIRMUX_SOCKET` / the `[layer:…]` badge in `ls`):
 

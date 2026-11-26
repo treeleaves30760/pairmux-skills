@@ -188,7 +188,7 @@ class SkillGuidanceTests(unittest.TestCase):
                        "ANTHROPIC_BASE_URL", "never secret values"):
             self.assertIn(detail, section)
         troubleshooting = self.refs["troubleshooting"]
-        for detail in ("1.5.1", "show-environment -g", "set-environment -g -u", "Fixed after 1.5.1"):
+        for detail in ("1.5.1", "show-environment -g", "set-environment -g -u", "Fixed in pairmux 1.6.0"):
             self.assertIn(detail, troubleshooting)
 
     def test_handoff_does_not_promise_redaction_or_auto_peek(self) -> None:
