@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in recipe for running sub-agents as a pairmux tree in place of the host's native sub-agents
+  (`references/hierarchy.md`, "Opt-in: pairmux in place of native sub-agents"): only when the user
+  explicitly asks (e.g. "use pairmux to build a hierarchy of sub-agents" /
+  「使用 pairmux 來構建階層式的管理 Subagents」); otherwise agents keep their native mechanism. Covers
+  the parent loop (explicit `--model`, task with `report` + permission to recurse, `wait --note` /
+  `events --tree --wait`, `kill`), grandchildren, and environment hygiene for inherited
+  `ANTHROPIC_*` proxy variables. SKILL.md gains a short opt-in pointer with both trigger phrasings.
+- Troubleshooting: "A child agent runs the wrong model or endpoint", including the tmux-backend
+  global-environment inheritance in pairmux 1.5.1 and older (fixed after 1.5.1) and its workaround.
+
+### Changed
+
+- SKILL.md drops the "known non-secret confirmation" worked example (Iron rule 3 and the golden loop
+  already cover it) to stay within 220 lines.
+
 ## [0.6.0] - 2026-11-19
 
 Requires pairmux CLI >=1.5.0 for the Windows statements (native Windows TUI, `update` and

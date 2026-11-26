@@ -17,7 +17,7 @@ pairmux-skills/
       interactive.md      # REPLs, pagers, [y/N], the never-guess-secrets rule
       collaboration.md    # attach / watch / note and the human handoff loop
       troubleshooting.md  # E_BUSY, dead terminals, wait gotchas, sentinel mode
-      hierarchy.md        # sub-agents as a tree: paths, ls --tree, report, E_SCOPE
+      hierarchy.md        # sub-agents as a tree: paths, ls --tree, report, E_SCOPE; opt-in tree recipe
   install-map.md          # per-agent skills paths (verified) + AGENTS.md fallback template
   evals/
     scenarios/S01..S10/   # setup.py + TASK.md + check.py each (M01..M08: multi-task suite)

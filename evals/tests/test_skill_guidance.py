@@ -174,6 +174,23 @@ class SkillGuidanceTests(unittest.TestCase):
         self.assertIn("never unset", self.main.lower())
         self.assertIn("`tui`", self.main)
 
+    def test_pairmux_subagent_tree_is_opt_in_only(self) -> None:
+        main = " ".join(self.main.split())
+        self.assertIn("Replacing your host's sub-agents is opt-in", main)
+        self.assertIn("only when the user explicitly asks", main)
+        hierarchy = self.refs["hierarchy"]
+        section = hierarchy.split("## Opt-in: pairmux in place of native sub-agents", 1)[1]
+        for text in (main, section):
+            self.assertIn("使用 pairmux 來構建階層式的管理 Subagents", text)
+            self.assertIn("use pairmux to build a hierarchy of sub-agents", " ".join(text.split()))
+        for detail in ("Not the default", "Do not suggest it unprompted", "--model <model-id>",
+                       "pairmux report", "--note --timeout 1800s", "events --tree --wait", "api/tests",
+                       "ANTHROPIC_BASE_URL", "never secret values"):
+            self.assertIn(detail, section)
+        troubleshooting = self.refs["troubleshooting"]
+        for detail in ("1.5.1", "show-environment -g", "set-environment -g -u", "Fixed after 1.5.1"):
+            self.assertIn(detail, troubleshooting)
+
     def test_handoff_does_not_promise_redaction_or_auto_peek(self) -> None:
         collaboration = self.refs["collaboration"]
         for detail in ("human-done", "note text", "dead", "not redaction", "journal"):
