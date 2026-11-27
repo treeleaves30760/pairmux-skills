@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `install-map.md` and the README list the agents `pairmux skill install` supports from CLI v1.6.1:
+  Antigravity / `agy` (`~/.gemini/config/skills/`, verified with agy 1.5.12), Qwen Code, Goose,
+  Crush, Augment, Continue, Junie, Trae, Qoder, CodeBuddy, iFlow, Lingma, OpenHands, Mistral Vibe,
+  Devin, Rovo Dev, Tabnine, ForgeCode, Zencoder, Command Code, Grok, Hermes, Snowflake Cortex, and
+  the `~/.agents/skills` readers Kimi, Warp, Zed and Pi. The skill itself is unchanged.
+
 ## [0.7.0] - 2026-11-27
 
 The opt-in sub-agent tree recipe works with pairmux CLI >=1.2.0 (`events --tree --wait` needs
