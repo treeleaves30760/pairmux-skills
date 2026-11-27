@@ -54,6 +54,9 @@ pairmux skill install --target claude-code
 pairmux skill install -t cline                 # -t aliases --target
 # targets: claude-code codex gemini cursor opencode copilot windsurf kiro amp agents
 #          cline roo-code kilo-code droid all
+#          v1.6.1+: antigravity (alias agy) qwen-code goose crush augment continue junie trae
+#          trae-cn qoder codebuddy iflow lingma openhands mistral-vibe devin rovodev tabnine
+#          forgecode zencoder command-code grok hermes cortex kimi warp zed pi
 pairmux skill install --target all --dry-run    # show the paths it would write
 ```
 

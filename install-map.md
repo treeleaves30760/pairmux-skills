@@ -10,7 +10,7 @@ skills directory as `.../skills/pairmux/`. No per-agent rewrite; the same folder
   references/{commands,interactive,collaboration,troubleshooting,hierarchy}.md
 ```
 
-## Verified paths (new targets checked 2026-10-22)
+## Verified paths (new targets checked 2026-11-27)
 
 Legend: **✓ verified** = confirmed on this machine or in the agent's own current docs; **~ best-known**
 = from current third-party/community docs, confirm on your version.
@@ -30,7 +30,31 @@ Legend: **✓ verified** = confirmed on this machine or in the agent's own curre
 | **Roo Code** | `~/.roo/skills/pairmux/` | `.roo/skills/pairmux/` | ✓ verified (docs) | [docs.roocode.com · Skills](https://docs.roocode.com/features/skills) |
 | **Kilo Code** | `~/.kilo/skills/pairmux/` | `.kilo/skills/pairmux/` | ✓ verified (docs) | [kilo.ai · Skills](https://kilo.ai/docs/customize/skills) |
 | **Factory Droid** | `~/.factory/skills/pairmux/` | `.factory/skills/pairmux/` | ✓ verified (docs) | [docs.factory.com · Skills](https://docs.factory.com/cli/configuration/skills) |
-| **Universal alias** | `~/.agents/skills/pairmux/` | `.agents/skills/pairmux/` | ✓ read by Gemini, OpenCode, Copilot, Windsurf, and Amp | multiple (above) |
+| **Antigravity (`agy`)** | `~/.gemini/config/skills/pairmux/` (also reads `~/.gemini/skills/`; same-named skills shown once) | `.agents/skills/pairmux/` | ✓ verified (agy 1.5.12 `/skills` probe on this machine, 2026-11-27) | agy built-in `agy-customizations` guide |
+| **Qwen Code** | `~/.qwen/skills/pairmux/` | `.qwen/skills/pairmux/` | ~ best-known | [vercel-labs/skills · src/agents.ts](https://github.com/vercel-labs/skills/blob/main/src/agents.ts) |
+| **Goose** | `~/.config/goose/skills/pairmux/` | `.goose/skills/pairmux/` | ~ best-known | [vercel-labs/skills · src/agents.ts](https://github.com/vercel-labs/skills/blob/main/src/agents.ts) |
+| **Crush** | `~/.config/crush/skills/pairmux/` | `.crush/skills/pairmux/` | ~ best-known | [vercel-labs/skills · src/agents.ts](https://github.com/vercel-labs/skills/blob/main/src/agents.ts) |
+| **Augment / Auggie** | `~/.augment/skills/pairmux/` | `.augment/skills/pairmux/` | ~ best-known | [vercel-labs/skills · src/agents.ts](https://github.com/vercel-labs/skills/blob/main/src/agents.ts) |
+| **Continue** | `~/.continue/skills/pairmux/` | `.continue/skills/pairmux/` | ~ best-known | [vercel-labs/skills · src/agents.ts](https://github.com/vercel-labs/skills/blob/main/src/agents.ts) |
+| **Junie** | `~/.junie/skills/pairmux/` | `.junie/skills/pairmux/` | ~ best-known | [vercel-labs/skills · src/agents.ts](https://github.com/vercel-labs/skills/blob/main/src/agents.ts) |
+| **Trae / Trae CN** | `~/.trae/skills/pairmux/` / `~/.trae-cn/skills/pairmux/` | `.trae/skills/pairmux/` | ~ best-known | [vercel-labs/skills · src/agents.ts](https://github.com/vercel-labs/skills/blob/main/src/agents.ts) |
+| **Qoder** | `~/.qoder/skills/pairmux/` | `.qoder/skills/pairmux/` | ~ best-known | [vercel-labs/skills · src/agents.ts](https://github.com/vercel-labs/skills/blob/main/src/agents.ts) |
+| **CodeBuddy** | `~/.codebuddy/skills/pairmux/` | `.codebuddy/skills/pairmux/` | ~ best-known | [vercel-labs/skills · src/agents.ts](https://github.com/vercel-labs/skills/blob/main/src/agents.ts) |
+| **iFlow CLI** | `~/.iflow/skills/pairmux/` | `.iflow/skills/pairmux/` | ~ best-known | [vercel-labs/skills · src/agents.ts](https://github.com/vercel-labs/skills/blob/main/src/agents.ts) |
+| **Lingma** | `~/.lingma/skills/pairmux/` | `.lingma/skills/pairmux/` | ~ best-known | [vercel-labs/skills · src/agents.ts](https://github.com/vercel-labs/skills/blob/main/src/agents.ts) |
+| **OpenHands** | `~/.openhands/skills/pairmux/` | `.openhands/skills/pairmux/` | ~ best-known | [vercel-labs/skills · src/agents.ts](https://github.com/vercel-labs/skills/blob/main/src/agents.ts) |
+| **Mistral Vibe** | `~/.vibe/skills/pairmux/` | `.vibe/skills/pairmux/` | ~ best-known | [vercel-labs/skills · src/agents.ts](https://github.com/vercel-labs/skills/blob/main/src/agents.ts) |
+| **Devin for Terminal** | `~/.config/devin/skills/pairmux/` | `.devin/skills/pairmux/` | ~ best-known | [vercel-labs/skills · src/agents.ts](https://github.com/vercel-labs/skills/blob/main/src/agents.ts) |
+| **Rovo Dev** | `~/.rovodev/skills/pairmux/` | `.rovodev/skills/pairmux/` | ~ best-known | [vercel-labs/skills · src/agents.ts](https://github.com/vercel-labs/skills/blob/main/src/agents.ts) |
+| **Tabnine CLI** | `~/.tabnine/agent/skills/pairmux/` | `.tabnine/agent/skills/pairmux/` | ~ best-known | [vercel-labs/skills · src/agents.ts](https://github.com/vercel-labs/skills/blob/main/src/agents.ts) |
+| **ForgeCode** | `~/.forge/skills/pairmux/` | `.forge/skills/pairmux/` | ~ best-known | [vercel-labs/skills · src/agents.ts](https://github.com/vercel-labs/skills/blob/main/src/agents.ts) |
+| **Zencoder** | `~/.zencoder/skills/pairmux/` | `.zencoder/skills/pairmux/` | ~ best-known | [vercel-labs/skills · src/agents.ts](https://github.com/vercel-labs/skills/blob/main/src/agents.ts) |
+| **Command Code** | `~/.commandcode/skills/pairmux/` | `.commandcode/skills/pairmux/` | ~ best-known | [vercel-labs/skills · src/agents.ts](https://github.com/vercel-labs/skills/blob/main/src/agents.ts) |
+| **Grok Build** | `~/.grok/skills/pairmux/` | `.grok/skills/pairmux/` | ~ best-known | [vercel-labs/skills · src/agents.ts](https://github.com/vercel-labs/skills/blob/main/src/agents.ts) |
+| **Hermes Agent** | `~/.hermes/skills/pairmux/` | `.hermes/skills/pairmux/` | ~ best-known | [vercel-labs/skills · src/agents.ts](https://github.com/vercel-labs/skills/blob/main/src/agents.ts) |
+| **Snowflake Cortex Code** | `~/.snowflake/cortex/skills/pairmux/` | `.cortex/skills/pairmux/` | ~ best-known | [vercel-labs/skills · src/agents.ts](https://github.com/vercel-labs/skills/blob/main/src/agents.ts) |
+| **Kimi Code CLI · Warp · Zed · Pi** | `~/.agents/skills/pairmux/` | `.agents/skills/pairmux/` | ~ best-known | [vercel-labs/skills · src/agents.ts](https://github.com/vercel-labs/skills/blob/main/src/agents.ts) |
+| **Universal alias** | `~/.agents/skills/pairmux/` | `.agents/skills/pairmux/` | ✓ read by Gemini, OpenCode, Copilot, Windsurf, and Amp; ~ Kimi, Warp, Zed, Pi | multiple (above) |
 | **Anything else** | — | — | AGENTS.md fallback (below) | — |
 
 Notes:
@@ -64,13 +88,19 @@ pairmux skill install -t cline                       # Cline
 pairmux skill install -t roo-code                    # Roo Code
 pairmux skill install -t kilo-code                   # Kilo Code
 pairmux skill install -t droid                       # Factory Droid
+pairmux skill install -t agy                         # Antigravity CLI / IDE (CLI v1.6.1+)
+pairmux skill install -t qwen-code                   # Qwen Code (CLI v1.6.1+)
 pairmux skill install --target agents                # universal ~/.agents/skills alias
 pairmux skill install -t all                         # every agent it can find
 pairmux skill install --target codex --dry-run      # print the paths it would write, do nothing
 ```
 `-t` is an alias for `--target`. Valid targets are `claude-code`, `codex`, `gemini`, `cursor`,
 `opencode`, `copilot`, `windsurf`, `kiro`, `amp`, `cline`, `roo-code`, `kilo-code`, `droid`, `agents`,
-and `all`. `cursor` installs relative to the **current working directory**
+and `all`. pairmux **v1.6.1+** adds `antigravity` (aliases `agy`, `antigravity-cli`), `qwen-code`,
+`goose`, `crush`, `augment`, `continue`, `junie`, `trae`, `trae-cn`, `qoder`, `codebuddy`, `iflow`,
+`lingma`, `openhands`, `mistral-vibe`, `devin`, `rovodev`, `tabnine`, `forgecode`, `zencoder`,
+`command-code`, `grok`, `hermes`, `cortex`, and the `~/.agents/skills` readers `kimi`, `warp`, `zed`,
+`pi` (which share the `agents` destination). `cursor` installs relative to the **current working directory**
 at `.cursor/skills/pairmux/`; the other named targets install to user/global paths in the table.
 `all` installs only where the agent's configuration directory already exists, reporting missing roots
 as skipped (and shared destinations only once). A named target can create its destination.
